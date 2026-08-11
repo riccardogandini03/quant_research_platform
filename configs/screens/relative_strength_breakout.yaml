@@ -1,0 +1,20 @@
+# Phase-1 screen using only price and benchmark data.
+schema_version: 1
+screen_id: relative-strength-breakout-v0
+name: Relative-strength breakout
+enabled: true
+universe: coverage
+as_of_policy: latest_complete_session
+minimum_history_sessions: 126
+
+conditions:
+  - feature: relative_return_sector_63d
+    operator: greater_than_or_equal
+    value: 0.05
+  - feature: realized_volatility_20d
+    operator: is_finite
+
+rank:
+  feature: relative_return_sector_63d
+  direction: descending
+limit: 25

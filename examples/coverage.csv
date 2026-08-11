@@ -1,0 +1,5 @@
+identifier,thesis_id,benchmark,peer_group
+ASML NA,asml_core,MSCI_EUROPE,semiconductor_equipment
+AAPL US,aapl_services,SPX,global_mega_cap_technology
+MSFT US,msft_cloud,SPX,global_mega_cap_technology
+SAP GY,,MSCI_EUROPE,enterprise_software

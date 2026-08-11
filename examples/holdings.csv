@@ -1,0 +1,5 @@
+identifier,weight,thesis_id,benchmark
+ASML NA,0.042,asml_core,MSCI_EUROPE
+AAPL US,0.035,aapl_services,SPX
+MSFT US,0.030,msft_cloud,SPX
+

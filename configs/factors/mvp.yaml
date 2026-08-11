@@ -1,0 +1,55 @@
+# Transparent Phase-1 factor settings. Licensed commercial risk-model fields do
+# not belong in this file; provider-specific mappings live behind connectors.
+schema_version: 1
+factor_set: equity-mvp-v0
+
+calendar:
+  periods_per_year: 252
+  default_timezone: UTC
+  # Returns are aligned on the intersection of completed exchange sessions.
+  alignment: inner
+
+returns:
+  type: simple
+  price_field: adjusted_close
+  horizons_sessions: [1, 2, 5, 20, 63, 126, 252]
+
+regression:
+  include_intercept: true
+  lookback_sessions: 126
+  minimum_observations: 63
+  # Fit through t-1 when scoring session t; including t would dampen an anomaly.
+  exclude_scored_session: true
+  residual_volatility_lookback: 126
+  covariance: ordinary
+
+normalization:
+  winsorize_lower_quantile: 0.01
+  winsorize_upper_quantile: 0.99
+  # Cross-sectional z-scores treat the available universe as the population.
+  zscore_ddof: 0
+  minimum_cross_section: 20
+  sector_neutral_when_available: true
+
+factors:
+  - name: market
+    kind: return_series
+    enabled: true
+    description: Broad equity-market return mapped by region.
+  - name: sector
+    kind: return_series
+    enabled: true
+    description: Sector benchmark return mapped by security.
+  - name: momentum_12_1
+    kind: cross_sectional_signal
+    enabled: true
+    lookback_sessions: 252
+    skip_recent_sessions: 21
+  - name: short_term_reversal
+    kind: cross_sectional_signal
+    enabled: true
+    lookback_sessions: 5
+  - name: low_volatility
+    kind: cross_sectional_signal
+    enabled: true
+    lookback_sessions: 63

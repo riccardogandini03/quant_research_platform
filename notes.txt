@@ -1,7 +1,7 @@
-AI investment-monitoring platform / quant Research-as-a-Service
-
-A portfolio manager uploads 30–100 holdings.
-Your system continuously monitors: earnings, estimates, price moves, filings, macro releases, news, valuation changes, factor exposures and unusual market movements.
+write a plan as md file to build (using also ai) a an autonomous investment-monitoring platform / quant Research-as-a-Service.
+should be mainly on quant research as a service rather than something that monitor the position on a portfolio.
+the idea is that a portfolio manager can uploads 30–100 holdings.
+the code automatically monitors: earnings, estimates, price moves, filings, macro releases, news, valuation changes, factor exposures and unusual market movements.
 Instead of sending 500 alerts, it tells the PM:
 
 ASML – Material portfolio development
@@ -12,9 +12,13 @@ Current P/E: 27.4x vs 5Y median 31.2x
 Thesis impact: Moderate
 Key risk: China semiconductor restrictions.
 
-factor screens, portfolio analytics, risk dashboards, backtesting, Bloomberg automation, LSEG automation, investment dashboards, Python automation
+cosnider that the code should have factor screens, risk dashboards of the stocks analyzed, backtesting, Bloomberg automation, LSEG automation.
 
+consider that the work should be like what it is done inside the file C:\Users\RiccardoGandini\OneDrive - Diaman\Documents\01\Strategy\_03_operational\_02_github_quant_research_platform\aapl_quant_research.py
 
+but implemented with more quantitative analysis.
+
+be specific and feel free to ask me everything you need before giving me an answer
 
 
 

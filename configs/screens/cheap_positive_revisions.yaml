@@ -1,0 +1,29 @@
+# Planned Phase-2 screen. It remains disabled until point-in-time estimates and
+# valuation histories are ingested; enabling it earlier would create look-ahead risk.
+schema_version: 1
+screen_id: cheap-positive-revisions-v0
+name: Cheap with positive revisions
+enabled: false
+universe: coverage
+as_of_policy: latest_complete_session
+requires_features:
+  - eps_revision_breadth_20d
+  - forward_pe_zscore_5y
+  - residual_momentum_20d
+
+conditions:
+  - feature: eps_revision_breadth_20d
+    operator: greater_than
+    value: 0.30
+  - feature: forward_pe_zscore_5y
+    operator: less_than
+    value: 0.0
+  - feature: residual_momentum_20d
+    operator: greater_than
+    value: 0.0
+
+rank:
+  feature: eps_revision_breadth_20d
+  direction: descending
+limit: 25
+

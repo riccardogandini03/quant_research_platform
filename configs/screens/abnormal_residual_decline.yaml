@@ -1,0 +1,21 @@
+# Phase-1 screen: a large company-specific decline after market/sector controls.
+schema_version: 1
+screen_id: abnormal-residual-decline-v0
+name: Abnormal residual decline
+enabled: true
+universe: coverage
+as_of_policy: latest_complete_session
+minimum_history_sessions: 126
+
+conditions:
+  - feature: residual_return_zscore_1d
+    operator: less_than_or_equal
+    value: -2.0
+  - feature: dollar_volume_zscore_20d
+    operator: greater_than_or_equal
+    value: 1.0
+
+rank:
+  feature: residual_return_zscore_1d
+  direction: ascending
+limit: 25

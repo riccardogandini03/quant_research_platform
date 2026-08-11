@@ -1,0 +1,109 @@
+name: quant-raas
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quant_raas}
+      POSTGRES_USER: ${POSTGRES_USER:-quant_raas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
+    ports:
+      # Bind only to localhost; Compose is a development environment.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      args:
+        INSTALL_EXTRAS: api,postgres
+    environment:
+      QUANT_RAAS_ENVIRONMENT: development
+      QUANT_RAAS_LOG_LEVEL: ${QUANT_RAAS_LOG_LEVEL:-INFO}
+      QUANT_RAAS_CONFIG_DIRECTORY: /app/configs
+      QUANT_RAAS_DATA_DIRECTORY: /app/data
+      QUANT_RAAS_MARKET_DATA_PROVIDER: fixture
+      QUANT_RAAS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quant_raas}:${POSTGRES_PASSWORD:-local-development-only}@db:5432/${POSTGRES_DB:-quant_raas}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # urllib is in the standard library, so the health check does not add curl
+      # merely for container probing. `/health` is the API's real liveness route.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  dashboard:
+    profiles: ["dashboard"]
+    build:
+      context: .
+      args:
+        INSTALL_EXTRAS: dashboard,postgres
+    command:
+      - python
+      - -m
+      - streamlit
+      - run
+      - apps/dashboard/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    environment:
+      QUANT_RAAS_ENVIRONMENT: development
+      QUANT_RAAS_CONFIG_DIRECTORY: /app/configs
+      QUANT_RAAS_DATA_DIRECTORY: /app/data
+      QUANT_RAAS_MARKET_DATA_PROVIDER: fixture
+      QUANT_RAAS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quant_raas}:${POSTGRES_PASSWORD:-local-development-only}@db:5432/${POSTGRES_DB:-quant_raas}
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      args:
+        INSTALL_EXTRAS: postgres
+    command: ["python", "-m", "apps.worker.main", "daily"]
+    environment:
+      QUANT_RAAS_ENVIRONMENT: development
+      QUANT_RAAS_CONFIG_DIRECTORY: /app/configs
+      QUANT_RAAS_DATA_DIRECTORY: /app/data
+      QUANT_RAAS_MARKET_DATA_PROVIDER: fixture
+      QUANT_RAAS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quant_raas}:${POSTGRES_PASSWORD:-local-development-only}@db:5432/${POSTGRES_DB:-quant_raas}
+    depends_on:
+      db:
+        condition: service_healthy
+    # A finite daily job has no HTTP liveness endpoint. Its exit code and workflow
+    # run record are the honest health signals, so no fabricated probe is defined.
+
+volumes:
+  postgres_data:

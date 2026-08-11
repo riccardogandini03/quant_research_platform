@@ -1,0 +1,34 @@
+# Keep credentials and local state out of the build context, including when a
+# remote BuildKit builder is used. The Dockerfile copies runtime paths explicitly.
+.git
+.github
+.env
+.env.*
+.venv*
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.hypothesis
+.mypy_cache
+.ruff_cache
+.coverage*
+htmlcov
+
+data
+artifacts
+reports/generated
+*.db
+*.sqlite*
+*.parquet
+*.feather
+
+# Development/reference material is not needed by the runtime image.
+tests
+docs
+examples
+notebooks
+aapl_quant_research.py
+PLAN_codex.md
+notes.txt

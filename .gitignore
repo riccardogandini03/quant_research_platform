@@ -1,0 +1,50 @@
+# Python bytecode and packaging output
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local interpreter selection
+.venv*/
+venv/
+.python-version
+
+# Test, type-checker, lint, and coverage caches
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local configuration and credentials. Keep the documented template tracked.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime databases, downloaded vendor data, and generated research artifacts
+data/
+artifacts/
+reports/generated/
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.feather
+
+# Notebooks and editor state
+.ipynb_checkpoints/
+.idea/
+.vscode/
+*.code-workspace
+
+# Operating-system noise
+.DS_Store
+Thumbs.db
+Desktop.ini
