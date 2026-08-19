@@ -6,12 +6,12 @@ transaction, allowing a CSV import or daily research run to remain atomic.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import insert, or_, select
+from sqlalchemy import and_, insert, or_, select
 from sqlalchemy.orm import Session
 
 from quant_raas.common.clock import ensure_utc
@@ -816,6 +816,73 @@ class SqlAlchemyFeatureRepository:
         for row in self.session.scalars(statement):
             latest.setdefault(row.feature_name, row)
         return tuple(_feature_from_record(row) for row in latest.values())
+
+    def panel_as_of(
+        self,
+        security_ids: Sequence[UUID],
+        feature_versions: Mapping[str, str],
+        *,
+        config_version: str,
+        as_of: datetime,
+    ) -> Sequence[FeatureSnapshot]:
+        cutoff = ensure_utc(as_of)
+        if not config_version.strip():
+            raise ValueError("config_version cannot be empty")
+        if any(
+            not name.strip() or not version.strip() for name, version in feature_versions.items()
+        ):
+            raise ValueError("feature names and versions cannot be empty")
+        requested_ids = tuple(sorted(set(security_ids), key=str))
+        requested_features = tuple(sorted(feature_versions.items()))
+        if not requested_ids or not requested_features:
+            return ()
+
+        requested_pairs = tuple(
+            and_(
+                FeatureSnapshotRecord.feature_name == name,
+                FeatureSnapshotRecord.feature_version == version,
+            )
+            for name, version in requested_features
+        )
+        statement = (
+            select(FeatureSnapshotRecord)
+            .where(
+                FeatureSnapshotRecord.security_id.in_(requested_ids),
+                or_(*requested_pairs),
+                FeatureSnapshotRecord.config_version == config_version,
+                FeatureSnapshotRecord.effective_at <= cutoff,
+                FeatureSnapshotRecord.available_at <= cutoff,
+            )
+            .order_by(
+                FeatureSnapshotRecord.security_id,
+                FeatureSnapshotRecord.feature_name,
+                FeatureSnapshotRecord.effective_at.desc(),
+                FeatureSnapshotRecord.available_at.desc(),
+                FeatureSnapshotRecord.calculated_at.desc(),
+            )
+        )
+        latest: dict[tuple[UUID, str], FeatureSnapshotRecord] = {}
+        for row in self.session.scalars(statement):
+            key = (row.security_id, row.feature_name)
+            selected = latest.get(key)
+            if selected is None:
+                latest[key] = row
+                continue
+            precedence = (row.effective_at, row.available_at, row.calculated_at)
+            selected_precedence = (
+                selected.effective_at,
+                selected.available_at,
+                selected.calculated_at,
+            )
+            if precedence == selected_precedence:
+                raise RepositoryConflictError(
+                    f"ambiguous latest feature vintage for security {row.security_id} "
+                    f"feature {row.feature_name!r}"
+                )
+        return tuple(
+            _feature_from_record(latest[key])
+            for key in sorted(latest, key=lambda item: (str(item[0]), item[1]))
+        )
 
 
 def _feature_from_record(row: FeatureSnapshotRecord) -> FeatureSnapshot:

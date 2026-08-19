@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -131,6 +131,15 @@ class EventRepository(Protocol):
 @runtime_checkable
 class FeatureRepository(Protocol):
     def upsert_many(self, snapshots: Iterable[FeatureSnapshot]) -> int: ...
+
+    def panel_as_of(
+        self,
+        security_ids: Sequence[UUID],
+        feature_versions: Mapping[str, str],
+        *,
+        config_version: str,
+        as_of: datetime,
+    ) -> Sequence[FeatureSnapshot]: ...
 
     def latest_as_of(
         self,
