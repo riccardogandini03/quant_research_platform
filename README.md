@@ -6,7 +6,7 @@ evidence-linked quantitative findings for a portfolio manager or analyst.
 Holdings are relevance context; this repository is not an order-management,
 execution, or accounting system.
 
-The repository is being built from [PLAN_codex.md](PLAN_codex.md). Interfaces and
+The repository is being built from [PLAN.md](PLAN.md). Interfaces and
 modules present in the tree are foundations, not a claim that every planned data
 source, screen, model, or UI is production-ready.
 
