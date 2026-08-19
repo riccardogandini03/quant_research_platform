@@ -122,12 +122,56 @@ def test_panel_as_of_returns_latest_requested_vintage_for_each_security(
     repository = SqlAlchemyFeatureRepository(sqlite_session)
     repository.upsert_many(
         [
-            _snapshot(101, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective_old, available_at=available_old, value=1.0),
-            _snapshot(102, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective_new, available_at=available_new, value=2.0),
-            _snapshot(103, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective_new, available_at=future, value=99.0),
-            _snapshot(104, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, feature_version="v2", effective_at=effective_new, available_at=available_new, value=200.0),
-            _snapshot(105, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, config_version="panel-v2", effective_at=effective_new, available_at=available_new, value=300.0),
-            _snapshot(106, security_id=second_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective_new, available_at=available_new, value=-1.0),
+            _snapshot(
+                101,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective_old,
+                available_at=available_old,
+                value=1.0,
+            ),
+            _snapshot(
+                102,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective_new,
+                available_at=available_new,
+                value=2.0,
+            ),
+            _snapshot(
+                103,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective_new,
+                available_at=future,
+                value=99.0,
+            ),
+            _snapshot(
+                104,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                feature_version="v2",
+                effective_at=effective_new,
+                available_at=available_new,
+                value=200.0,
+            ),
+            _snapshot(
+                105,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                config_version="panel-v2",
+                effective_at=effective_new,
+                available_at=available_new,
+                value=300.0,
+            ),
+            _snapshot(
+                106,
+                security_id=second_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective_new,
+                available_at=available_new,
+                value=-1.0,
+            ),
         ]
     )
 
@@ -170,10 +214,15 @@ def test_panel_as_of_validates_cutoff_and_version_pins(
     with pytest.raises(ValueError, match="config_version cannot be empty"):
         repository.panel_as_of([], {}, config_version=" ", as_of=datetime(2024, 1, 9, tzinfo=UTC))
     with pytest.raises(ValueError, match="feature names and versions cannot be empty"):
-        repository.panel_as_of([], {"signal": " "}, config_version="panel-v1", as_of=datetime(2024, 1, 9, tzinfo=UTC))
-    assert repository.panel_as_of(
-        [], {"signal": "v1"}, config_version="panel-v1", as_of=datetime(2024, 1, 9, tzinfo=UTC)
-    ) == ()
+        repository.panel_as_of(
+            [], {"signal": " "}, config_version="panel-v1", as_of=datetime(2024, 1, 9, tzinfo=UTC)
+        )
+    assert (
+        repository.panel_as_of(
+            [], {"signal": "v1"}, config_version="panel-v1", as_of=datetime(2024, 1, 9, tzinfo=UTC)
+        )
+        == ()
+    )
 
 
 def test_panel_as_of_rejects_ambiguous_top_vintage(
@@ -189,8 +238,26 @@ def test_panel_as_of_rejects_ambiguous_top_vintage(
     repository = SqlAlchemyFeatureRepository(sqlite_session)
     repository.upsert_many(
         [
-            _snapshot(201, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective, available_at=available, calculated_at=calculated, value=1.0, code_version="code-a"),
-            _snapshot(202, security_id=sample_security.security_id, research_run_id=research_run.research_run_id, effective_at=effective, available_at=available, calculated_at=calculated, value=2.0, code_version="code-b"),
+            _snapshot(
+                201,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective,
+                available_at=available,
+                calculated_at=calculated,
+                value=1.0,
+                code_version="code-a",
+            ),
+            _snapshot(
+                202,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=effective,
+                available_at=available,
+                calculated_at=calculated,
+                value=2.0,
+                code_version="code-b",
+            ),
         ]
     )
     with pytest.raises(RepositoryConflictError, match="ambiguous latest feature vintage"):
@@ -270,7 +337,10 @@ def panel_as_of(
                 f"ambiguous latest feature vintage for security {row.security_id} "
                 f"feature {row.feature_name!r}"
             )
-    return tuple(_feature_from_record(latest[key]) for key in sorted(latest, key=lambda item: (str(item[0]), item[1])))
+    return tuple(
+        _feature_from_record(latest[key])
+        for key in sorted(latest, key=lambda item: (str(item[0]), item[1]))
+    )
 ```
 
 - [ ] **Step 5: Run repository tests, formatting, and typing**
@@ -308,6 +378,7 @@ git commit -m "feat: add point-in-time feature panel query"
 ```python
 FEATURE_PANEL_COLUMNS: tuple[str, ...]
 
+
 def snapshots_to_frame(
     snapshots: Sequence[FeatureSnapshot],
     *,
@@ -342,8 +413,32 @@ def test_feature_panel_is_stably_ordered_and_keeps_lineage() -> None:
     available = decision - timedelta(minutes=1)
     run_id = UUID(int=100)
     snapshots = [
-        FeatureSnapshot(feature_snapshot_id=UUID(int=2), security_id=UUID(int=2), feature_name="z", feature_version="v1", effective_at=available, available_at=available, calculated_at=decision, value=2.0, research_run_id=run_id, code_version="code-v1", config_version="config-v1"),
-        FeatureSnapshot(feature_snapshot_id=UUID(int=1), security_id=UUID(int=1), feature_name="a", feature_version="v1", effective_at=available, available_at=available, calculated_at=decision, value=1.0, research_run_id=run_id, code_version="code-v1", config_version="config-v1"),
+        FeatureSnapshot(
+            feature_snapshot_id=UUID(int=2),
+            security_id=UUID(int=2),
+            feature_name="z",
+            feature_version="v1",
+            effective_at=available,
+            available_at=available,
+            calculated_at=decision,
+            value=2.0,
+            research_run_id=run_id,
+            code_version="code-v1",
+            config_version="config-v1",
+        ),
+        FeatureSnapshot(
+            feature_snapshot_id=UUID(int=1),
+            security_id=UUID(int=1),
+            feature_name="a",
+            feature_version="v1",
+            effective_at=available,
+            available_at=available,
+            calculated_at=decision,
+            value=1.0,
+            research_run_id=run_id,
+            code_version="code-v1",
+            config_version="config-v1",
+        ),
     ]
     frame = snapshots_to_frame(snapshots, decision_at=decision)
     assert frame[["security_id", "feature_name", "value"]].to_records(index=False).tolist() == [
@@ -423,7 +518,9 @@ def snapshots_to_frame(
     frame = pd.DataFrame.from_records(rows, columns=FEATURE_PANEL_COLUMNS)
     if frame.empty:
         return frame
-    return frame.sort_values(["security_id", "feature_name"], kind="mergesort").reset_index(drop=True)
+    return frame.sort_values(["security_id", "feature_name"], kind="mergesort").reset_index(
+        drop=True
+    )
 ```
 
 Export `FEATURE_PANEL_COLUMNS` and `snapshots_to_frame` from `feature_store/__init__.py` alongside the registry types.
@@ -522,12 +619,14 @@ Import `field_validator` and add:
 feature_config_version: str | None = Field(default=None, min_length=1)
 feature_versions: dict[str, str] = Field(default_factory=dict)
 
+
 @field_validator("feature_versions")
 @classmethod
 def validate_feature_versions(cls, value: dict[str, str]) -> dict[str, str]:
     if any(not name.strip() or not version.strip() for name, version in value.items()):
         raise ValueError("feature version names and values cannot be empty")
     return value
+
 
 @property
 def referenced_features(self) -> tuple[str, ...]:
@@ -705,11 +804,52 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
     feature_repository = SqlAlchemyFeatureRepository(sqlite_session)
     feature_repository.upsert_many(
         [
-            _screen_snapshot(301, sample_security.security_id, research_run.research_run_id, "residual_return_zscore_1d", -2.5, effective, available),
-            _screen_snapshot(302, sample_security.security_id, research_run.research_run_id, "dollar_volume_zscore_20d", 1.2, effective, available),
-            _screen_snapshot(303, second_security.security_id, research_run.research_run_id, "residual_return_zscore_1d", -1.0, effective, available),
-            _screen_snapshot(304, sample_security.security_id, research_run.research_run_id, "residual_return_zscore_1d", 0.0, effective, future),
-            _screen_snapshot(305, second_security.security_id, research_run.research_run_id, "residual_return_zscore_1d", -3.0, effective, available, feature_version="price-mvp-v1"),
+            _screen_snapshot(
+                301,
+                sample_security.security_id,
+                research_run.research_run_id,
+                "residual_return_zscore_1d",
+                -2.5,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
+                302,
+                sample_security.security_id,
+                research_run.research_run_id,
+                "dollar_volume_zscore_20d",
+                1.2,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
+                303,
+                second_security.security_id,
+                research_run.research_run_id,
+                "residual_return_zscore_1d",
+                -1.0,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
+                304,
+                sample_security.security_id,
+                research_run.research_run_id,
+                "residual_return_zscore_1d",
+                0.0,
+                effective,
+                future,
+            ),
+            _screen_snapshot(
+                305,
+                second_security.security_id,
+                research_run.research_run_id,
+                "residual_return_zscore_1d",
+                -3.0,
+                effective,
+                available,
+                feature_version="price-mvp-v1",
+            ),
         ]
     )
 
@@ -796,14 +936,10 @@ def test_repository_backed_screen_validation_fails_before_data_access() -> None:
     }
 
     with pytest.raises(ValueError, match="feature_config_version is required"):
-        service.evaluate(
-            _versioned_definition(config_version=None), security_ids, as_of=cutoff
-        )
+        service.evaluate(_versioned_definition(config_version=None), security_ids, as_of=cutoff)
     with pytest.raises(ValueError, match="missing feature version pins"):
         service.evaluate(
-            _versioned_definition(
-                pins={"residual_return_zscore_1d": "price-mvp-v0"}
-            ),
+            _versioned_definition(pins={"residual_return_zscore_1d": "price-mvp-v0"}),
             security_ids,
             as_of=cutoff,
         )
@@ -815,16 +951,12 @@ def test_repository_backed_screen_validation_fails_before_data_access() -> None:
         )
     with pytest.raises(ValueError, match="unknown feature"):
         service.evaluate(
-            _versioned_definition(
-                pins={**complete, "residual_return_zscore_1d": "missing-v9"}
-            ),
+            _versioned_definition(pins={**complete, "residual_return_zscore_1d": "missing-v9"}),
             security_ids,
             as_of=cutoff,
         )
     with pytest.raises(ValueError, match="strictly increasing"):
-        service.evaluate_history(
-            _versioned_definition(), security_ids, cutoffs=[cutoff, cutoff]
-        )
+        service.evaluate_history(_versioned_definition(), security_ids, cutoffs=[cutoff, cutoff])
 ```
 
 - [ ] **Step 4: Implement `ScreenExecutionService`**
@@ -885,11 +1017,12 @@ class ScreenExecutionService:
         cutoffs: Sequence[datetime],
     ) -> tuple[ScreenResult, ...]:
         normalized = tuple(ensure_utc(cutoff) for cutoff in cutoffs)
-        if any(current >= following for current, following in zip(normalized, normalized[1:], strict=False)):
+        if any(
+            current >= following
+            for current, following in zip(normalized, normalized[1:], strict=False)
+        ):
             raise ValueError("historical screen cutoffs must be strictly increasing")
-        return tuple(
-            self.evaluate(definition, security_ids, as_of=cutoff) for cutoff in normalized
-        )
+        return tuple(self.evaluate(definition, security_ids, as_of=cutoff) for cutoff in normalized)
 
     def _validated_versions(self, definition: ScreenDefinition) -> dict[str, str]:
         if definition.feature_config_version is None:
