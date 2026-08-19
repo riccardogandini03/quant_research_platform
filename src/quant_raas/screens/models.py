@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ComparisonOperator(StrEnum):
@@ -69,6 +69,8 @@ class ScreenDefinition(BaseModel):
     universe: str = "coverage"
     as_of_policy: str = "latest_complete_session"
     minimum_history_sessions: int = Field(default=1, ge=1)
+    feature_config_version: str | None = Field(default=None, min_length=1)
+    feature_versions: dict[str, str] = Field(default_factory=dict)
     requires_features: tuple[str, ...] = ()
     conditions: tuple[ScreenCriterion, ...] = Field(min_length=1)
     rank: ScreenRanking | None = None
@@ -80,6 +82,21 @@ class ScreenDefinition(BaseModel):
         """Expose a domain-oriented name while retaining the YAML contract."""
 
         return self.conditions
+
+    @field_validator("feature_versions")
+    @classmethod
+    def validate_feature_versions(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(not name.strip() or not version.strip() for name, version in value.items()):
+            raise ValueError("feature version names and values cannot be empty")
+        return value
+
+    @property
+    def referenced_features(self) -> tuple[str, ...]:
+        names = [criterion.feature for criterion in self.criteria]
+        names.extend(self.requires_features)
+        if self.rank is not None:
+            names.append(self.rank.feature)
+        return tuple(dict.fromkeys(names))
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ScreenDefinition:

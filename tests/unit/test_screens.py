@@ -36,6 +36,36 @@ def test_all_repository_screen_definitions_validate() -> None:
     ) == ("relative_return_sector_63d", "realized_volatility_20d")
 
 
+def test_repository_screens_pin_feature_and_configuration_versions() -> None:
+    definitions = [
+        ScreenDefinition.from_yaml(path)
+        for path in sorted((REPOSITORY_ROOT / "configs" / "screens").glob("*.yaml"))
+    ]
+    assert all(item.feature_config_version for item in definitions)
+    assert all(set(item.feature_versions) == set(item.referenced_features) for item in definitions)
+
+
+def test_ranking_feature_is_loaded_even_when_not_a_condition() -> None:
+    definition = ScreenDefinition(
+        screen_id="rank-only-v1",
+        name="Rank-only dependency",
+        conditions=[{"feature": "signal", "operator": "greater_than", "value": 0.0}],
+        rank={"feature": "rank_only", "direction": "descending"},
+    )
+    features = pd.DataFrame(
+        [
+            ("A", "signal", 1.0, "2024-01-05T20:00:00Z"),
+            ("A", "rank_only", 1.0, "2024-01-05T20:00:00Z"),
+            ("B", "signal", 1.0, "2024-01-05T20:00:00Z"),
+            ("B", "rank_only", 2.0, "2024-01-05T20:00:00Z"),
+        ],
+        columns=["security_id", "feature_name", "value", "available_at"],
+    )
+    result = run_screen(features, definition, as_of=datetime(2024, 1, 5, 21, 0, tzinfo=UTC))
+    assert definition.referenced_features == ("signal", "rank_only")
+    assert result.matches == ("B", "A")
+
+
 def _feature_panel() -> pd.DataFrame:
     return pd.DataFrame(
         [

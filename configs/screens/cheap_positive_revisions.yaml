@@ -6,6 +6,11 @@ name: Cheap with positive revisions
 enabled: false
 universe: coverage
 as_of_policy: latest_complete_session
+feature_config_version: equity-estimates-v0
+feature_versions:
+  eps_revision_breadth_20d: estimates-mvp-v0
+  forward_pe_zscore_5y: valuation-mvp-v0
+  residual_momentum_20d: price-mvp-v0
 requires_features:
   - eps_revision_breadth_20d
   - forward_pe_zscore_5y

@@ -59,9 +59,7 @@ def run_screen(
     if not definition.enabled:
         raise ValueError(f"screen {definition.screen_id!r} is disabled")
 
-    wanted = {criterion.feature for criterion in definition.criteria} | set(
-        definition.requires_features
-    )
+    wanted = set(definition.referenced_features)
     work = features.loc[features["feature_name"].isin(wanted)].copy()
     work["available_at"] = pd.to_datetime(work["available_at"], utc=True, errors="coerce")
     if work["available_at"].isna().any():

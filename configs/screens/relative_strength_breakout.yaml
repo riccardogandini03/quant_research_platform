@@ -6,6 +6,10 @@ enabled: true
 universe: coverage
 as_of_policy: latest_complete_session
 minimum_history_sessions: 126
+feature_config_version: equity-mvp-v0
+feature_versions:
+  relative_return_sector_63d: price-mvp-v0
+  realized_volatility_20d: price-mvp-v0
 
 conditions:
   - feature: relative_return_sector_63d

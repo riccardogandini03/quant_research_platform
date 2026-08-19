@@ -6,6 +6,10 @@ enabled: true
 universe: coverage
 as_of_policy: latest_complete_session
 minimum_history_sessions: 126
+feature_config_version: equity-mvp-v0
+feature_versions:
+  residual_return_zscore_1d: price-mvp-v0
+  dollar_volume_zscore_20d: price-mvp-v0
 
 conditions:
   - feature: residual_return_zscore_1d
