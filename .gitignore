@@ -10,6 +10,7 @@ dist/
 .venv*/
 venv/
 .python-version
+.worktrees/
 
 # Test, type-checker, lint, and coverage caches
 .pytest_cache/
