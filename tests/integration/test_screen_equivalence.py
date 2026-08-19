@@ -101,6 +101,15 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
                 available,
             ),
             _screen_snapshot(
+                306,
+                second_security.security_id,
+                research_run.research_run_id,
+                "dollar_volume_zscore_20d",
+                1.2,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
                 304,
                 sample_security.security_id,
                 research_run.research_run_id,
@@ -138,7 +147,7 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
     )[0]
 
     assert one_off.matches == (str(sample_security.security_id),)
-    assert one_off.excluded_for_missing_data == (str(second_security.security_id),)
+    assert one_off.excluded_for_missing_data == ()
     assert historical.matches == one_off.matches
     assert historical.excluded_for_missing_data == one_off.excluded_for_missing_data
     pd.testing.assert_frame_equal(historical.evaluated, one_off.evaluated)
