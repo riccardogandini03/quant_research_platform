@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, insert, or_, select
+from sqlalchemy import and_, func, insert, or_, select
 from sqlalchemy.orm import Session
 
 from quant_raas.common.clock import ensure_utc
@@ -844,8 +844,22 @@ class SqlAlchemyFeatureRepository:
             )
             for name, version in requested_features
         )
-        statement = (
-            select(FeatureSnapshotRecord)
+        vintage_rank = func.dense_rank().over(
+            partition_by=(
+                FeatureSnapshotRecord.security_id,
+                FeatureSnapshotRecord.feature_name,
+            ),
+            order_by=(
+                FeatureSnapshotRecord.effective_at.desc(),
+                FeatureSnapshotRecord.available_at.desc(),
+                FeatureSnapshotRecord.calculated_at.desc(),
+            ),
+        )
+        ranked = (
+            select(
+                FeatureSnapshotRecord.feature_snapshot_id.label("feature_snapshot_id"),
+                vintage_rank.label("vintage_rank"),
+            )
             .where(
                 FeatureSnapshotRecord.security_id.in_(requested_ids),
                 or_(*requested_pairs),
@@ -853,12 +867,19 @@ class SqlAlchemyFeatureRepository:
                 FeatureSnapshotRecord.effective_at <= cutoff,
                 FeatureSnapshotRecord.available_at <= cutoff,
             )
+            .subquery()
+        )
+        statement = (
+            select(FeatureSnapshotRecord)
+            .join(
+                ranked,
+                FeatureSnapshotRecord.feature_snapshot_id == ranked.c.feature_snapshot_id,
+            )
+            .where(ranked.c.vintage_rank == 1)
             .order_by(
                 FeatureSnapshotRecord.security_id,
                 FeatureSnapshotRecord.feature_name,
-                FeatureSnapshotRecord.effective_at.desc(),
-                FeatureSnapshotRecord.available_at.desc(),
-                FeatureSnapshotRecord.calculated_at.desc(),
+                FeatureSnapshotRecord.feature_snapshot_id,
             )
         )
         latest: dict[tuple[UUID, str], FeatureSnapshotRecord] = {}

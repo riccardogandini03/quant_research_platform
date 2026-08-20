@@ -83,6 +83,13 @@ class ScreenDefinition(BaseModel):
 
         return self.conditions
 
+    @field_validator("feature_config_version")
+    @classmethod
+    def validate_feature_config_version(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("feature_config_version cannot be empty")
+        return value
+
     @field_validator("feature_versions")
     @classmethod
     def validate_feature_versions(cls, value: dict[str, str]) -> dict[str, str]:

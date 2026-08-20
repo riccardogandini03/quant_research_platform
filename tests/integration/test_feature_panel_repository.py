@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from quant_raas.common.errors import RepositoryConflictError
 from quant_raas.domain.market import FeatureSnapshot
 from quant_raas.domain.research import ResearchRun
 from quant_raas.domain.security import Security
+from quant_raas.storage.models import FeatureSnapshotRecord
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
     SqlAlchemyResearchRepository,
@@ -104,6 +106,7 @@ def test_panel_as_of_returns_latest_requested_vintage_for_each_security(
                 feature_version="v2",
                 effective_at=effective_new,
                 available_at=available_new,
+                calculated_at=available_new + timedelta(minutes=2),
                 value=200.0,
             ),
             _snapshot(
@@ -123,19 +126,63 @@ def test_panel_as_of_returns_latest_requested_vintage_for_each_security(
                 available_at=available_new,
                 value=-1.0,
             ),
+            _snapshot(
+                107,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                feature_name="quality",
+                feature_version="v2",
+                effective_at=effective_new,
+                available_at=available_new,
+                value=4.0,
+            ),
+            _snapshot(
+                108,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                feature_name="quality",
+                feature_version="v1",
+                effective_at=effective_new,
+                available_at=available_new,
+                calculated_at=available_new + timedelta(minutes=2),
+                value=400.0,
+            ),
+            _snapshot(
+                109,
+                security_id=sample_security.security_id,
+                research_run_id=research_run.research_run_id,
+                effective_at=future,
+                available_at=available_new,
+                calculated_at=future + timedelta(minutes=1),
+                value=999.0,
+            ),
         ]
     )
 
-    panel = repository.panel_as_of(
-        [second_security.security_id, sample_security.security_id],
-        {"signal": "v1"},
-        config_version="panel-v1",
-        as_of=cutoff,
-    )
+    materialized_ids: list[UUID] = []
 
-    assert [(item.security_id, item.feature_name, item.value) for item in panel] == [
-        (second_security.security_id, "signal", -1.0),
-        (sample_security.security_id, "signal", 2.0),
+    def record_load(row: FeatureSnapshotRecord, _context: object) -> None:
+        materialized_ids.append(row.feature_snapshot_id)
+
+    sqlite_session.expunge_all()
+    event.listen(FeatureSnapshotRecord, "load", record_load)
+    try:
+        panel = repository.panel_as_of(
+            [second_security.security_id, sample_security.security_id],
+            {"signal": "v1", "quality": "v2"},
+            config_version="panel-v1",
+            as_of=cutoff,
+        )
+    finally:
+        event.remove(FeatureSnapshotRecord, "load", record_load)
+
+    assert materialized_ids == [UUID(int=106), UUID(int=107), UUID(int=102)]
+    assert [
+        (item.security_id, item.feature_name, item.feature_version, item.value) for item in panel
+    ] == [
+        (second_security.security_id, "signal", "v1", -1.0),
+        (sample_security.security_id, "quality", "v2", 4.0),
+        (sample_security.security_id, "signal", "v1", 2.0),
     ]
 
 

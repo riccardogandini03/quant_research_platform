@@ -14,7 +14,7 @@ from quant_raas.domain.market import FeatureSnapshot
 from quant_raas.domain.research import ResearchRun
 from quant_raas.domain.security import Security
 from quant_raas.feature_store.registry import mvp_price_features
-from quant_raas.screens.models import ScreenDefinition
+from quant_raas.screens.models import MissingPolicy, ScreenDefinition
 from quant_raas.screens.service import ScreenExecutionService
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
@@ -61,9 +61,17 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
     second_security = sample_security.model_copy(
         update={"security_id": UUID(int=2), "name": "Second Corp"}
     )
+    partial_security = sample_security.model_copy(
+        update={"security_id": UUID(int=3), "name": "Partial Corp"}
+    )
+    absent_security = sample_security.model_copy(
+        update={"security_id": UUID(int=4), "name": "Absent Corp"}
+    )
     securities = SqlAlchemySecurityRepository(sqlite_session)
     securities.add_security(sample_security)
     securities.add_security(second_security)
+    securities.add_security(partial_security)
+    securities.add_security(absent_security)
     SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
 
     cutoff = datetime(2024, 1, 9, 22, 0, tzinfo=UTC)
@@ -110,6 +118,15 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
                 available,
             ),
             _screen_snapshot(
+                307,
+                partial_security.security_id,
+                research_run.research_run_id,
+                "residual_return_zscore_1d",
+                -3.5,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
                 304,
                 sample_security.security_id,
                 research_run.research_run_id,
@@ -135,22 +152,69 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
         REPOSITORY_ROOT / "configs" / "screens" / "abnormal_residual_decline.yaml"
     )
     service = ScreenExecutionService(feature_repository, mvp_price_features())
+    requested_ids = [
+        absent_security.security_id,
+        second_security.security_id,
+        partial_security.security_id,
+        sample_security.security_id,
+        absent_security.security_id,
+    ]
     one_off = service.evaluate(
         definition,
-        [second_security.security_id, sample_security.security_id],
+        requested_ids,
         as_of=cutoff,
     )
     historical = service.evaluate_history(
         definition,
-        [second_security.security_id, sample_security.security_id],
+        requested_ids,
         cutoffs=[cutoff],
     )[0]
 
     assert one_off.matches == (str(sample_security.security_id),)
-    assert one_off.excluded_for_missing_data == ()
+    assert one_off.excluded_for_missing_data == (
+        str(partial_security.security_id),
+        str(absent_security.security_id),
+    )
+    assert one_off.evaluated.index.is_unique
+    assert set(one_off.evaluated.index) == {str(security_id) for security_id in requested_ids}
+    assert one_off.evaluated.loc[
+        str(second_security.security_id), "residual_return_zscore_1d"
+    ] == pytest.approx(-1.0)
+    assert not bool(one_off.evaluated.loc[str(second_security.security_id), "matches"])
+    assert pd.isna(
+        one_off.evaluated.loc[str(partial_security.security_id), "dollar_volume_zscore_20d"]
+    )
+    assert one_off.evaluated.loc[
+        str(partial_security.security_id), "residual_return_zscore_1d"
+    ] == pytest.approx(-3.5)
+    assert (
+        one_off.evaluated.loc[str(absent_security.security_id)]
+        .isna()
+        .loc[["dollar_volume_zscore_20d", "residual_return_zscore_1d"]]
+        .all()
+    )
     assert historical.matches == one_off.matches
     assert historical.excluded_for_missing_data == one_off.excluded_for_missing_data
     pd.testing.assert_frame_equal(historical.evaluated, one_off.evaluated)
+
+    fail_definition = definition.model_copy(update={"missing_policy": MissingPolicy.FAIL})
+    with pytest.raises(ValueError, match=str(absent_security.security_id)):
+        service.evaluate(
+            fail_definition,
+            [sample_security.security_id, absent_security.security_id],
+            as_of=cutoff,
+        )
+    with pytest.raises(ValueError, match=str(partial_security.security_id)):
+        service.evaluate(
+            fail_definition,
+            [sample_security.security_id, partial_security.security_id],
+            as_of=cutoff,
+        )
+
+    empty = service.evaluate(definition, [], as_of=cutoff)
+    assert empty.matches == ()
+    assert empty.excluded_for_missing_data == ()
+    assert empty.evaluated.empty
 
 
 class _NeverCalledFeatureRepository:
@@ -196,6 +260,13 @@ def test_repository_backed_screen_validation_fails_before_data_access() -> None:
         "dollar_volume_zscore_20d": "price-mvp-v0",
     }
 
+    with pytest.raises(ValueError, match="feature_config_version cannot be empty"):
+        _versioned_definition(config_version=" ")
+    bypassed = _versioned_definition().model_copy(update={"feature_config_version": " "})
+    with pytest.raises(ValueError, match="feature_config_version cannot be empty"):
+        service.evaluate(bypassed, security_ids, as_of=cutoff)
+    preserved = " config-version-with-spaces "
+    assert _versioned_definition(config_version=preserved).feature_config_version == preserved
     with pytest.raises(ValueError, match="feature_config_version is required"):
         service.evaluate(_versioned_definition(config_version=None), security_ids, as_of=cutoff)
     with pytest.raises(ValueError, match="missing feature version pins"):
