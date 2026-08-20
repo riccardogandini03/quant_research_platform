@@ -78,6 +78,14 @@ def test_content_normalizes_features_and_rejects_duplicate_node_ids() -> None:
         ThesisContent.model_validate(payload)
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_content_rejects_non_integer_schema_version_one(schema_version: object) -> None:
+    payload = thesis_content().model_dump(mode="python")
+    payload["schema_version"] = schema_version
+    with pytest.raises(ValidationError, match="schema_version"):
+        ThesisContent.model_validate(payload)
+
+
 def test_invalidation_threshold_order_depends_on_comparator() -> None:
     with pytest.raises(ValidationError, match="breach threshold must be below warning"):
         ThesisInvalidationRule(

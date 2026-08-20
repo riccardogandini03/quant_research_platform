@@ -294,6 +294,13 @@ class ThesisContent(DomainModel):
     risks: tuple[ThesisRisk, ...] = ()
     invalidation_rules: tuple[ThesisInvalidationRule, ...] = ()
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version(cls, value: object) -> int:
+        if type(value) is int and value == 1:
+            return value
+        raise ValueError("schema_version must be the integer 1")
+
     @model_validator(mode="after")
     def validate_unique_node_ids(self) -> ThesisContent:
         node_ids = (
