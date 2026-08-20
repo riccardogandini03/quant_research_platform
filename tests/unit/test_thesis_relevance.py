@@ -383,3 +383,51 @@ def test_configuration_is_strict_frozen_and_requires_ordered_unique_labels(tmp_p
     config_path.write_text("schema_version: 1\nunknown: rejected\n", encoding="utf-8")
     with pytest.raises(ValidationError):
         ThesisRelevanceConfig.from_yaml(config_path)
+
+
+def test_configuration_rejects_none_as_a_positive_score_threshold() -> None:
+    with pytest.raises(ValidationError, match="impact threshold labels cannot include none"):
+        ThesisRelevanceConfig.model_validate(
+            {
+                "schema_version": 1,
+                "method_version": "thesis-relevance-v1",
+                "zero_impact": "none",
+                "impact_thresholds": [
+                    {"name": "high", "minimum_score": 0.75},
+                    {"name": "none", "minimum_score": 0.00},
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("minimum_score", [True, False, "0.5"])
+def test_configuration_rejects_coerced_threshold_minimums(minimum_score: object) -> None:
+    with pytest.raises(ValidationError, match="minimum_score must be a finite real number"):
+        ThesisRelevanceConfig.model_validate(
+            {
+                "schema_version": 1,
+                "method_version": "thesis-relevance-v1",
+                "zero_impact": "none",
+                "impact_thresholds": [
+                    {"name": "high", "minimum_score": 0.75},
+                    {"name": "moderate", "minimum_score": minimum_score},
+                    {"name": "low", "minimum_score": 0.00},
+                ],
+            }
+        )
+
+
+def test_configuration_rejects_repeated_minimum_scores() -> None:
+    with pytest.raises(ValidationError, match="impact thresholds must be strictly descending"):
+        ThesisRelevanceConfig.model_validate(
+            {
+                "schema_version": 1,
+                "method_version": "thesis-relevance-v1",
+                "zero_impact": "none",
+                "impact_thresholds": [
+                    {"name": "high", "minimum_score": 0.75},
+                    {"name": "moderate", "minimum_score": 0.75},
+                    {"name": "low", "minimum_score": 0.00},
+                ],
+            }
+        )

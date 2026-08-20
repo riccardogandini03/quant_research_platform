@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from itertools import pairwise
 from math import isfinite
 from numbers import Real
 from pathlib import Path
@@ -35,11 +36,11 @@ class ImpactThreshold(BaseModel):
     name: ThesisImpact
     minimum_score: float = Field(ge=0.0, le=1.0)
 
-    @field_validator("minimum_score")
+    @field_validator("minimum_score", mode="before")
     @classmethod
-    def validate_finite_minimum_score(cls, value: float) -> float:
-        if not isfinite(value):
-            raise ValueError("minimum_score must be finite")
+    def validate_finite_minimum_score(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value):
+            raise ValueError("minimum_score must be a finite real number")
         return value
 
 
@@ -71,11 +72,13 @@ class ThesisRelevanceConfig(BaseModel):
         if self.zero_impact is not ThesisImpact.NONE:
             raise ValueError("zero_impact must be none")
         names = tuple(threshold.name for threshold in self.impact_thresholds)
+        if ThesisImpact.NONE in names:
+            raise ValueError("impact threshold labels cannot include none")
         if len(names) != len(set(names)):
             raise ValueError("impact threshold labels must be unique")
         minimums = tuple(threshold.minimum_score for threshold in self.impact_thresholds)
-        if minimums != tuple(sorted(minimums, reverse=True)):
-            raise ValueError("impact thresholds must be ordered from highest to lowest")
+        if any(left <= right for left, right in pairwise(minimums)):
+            raise ValueError("impact thresholds must be strictly descending")
         if minimums[-1] != 0.0:
             raise ValueError("impact thresholds must include a zero lower bound")
         return self
@@ -104,6 +107,8 @@ def select_thesis_version(
 ) -> ThesisVersionSelection:
     """Select one immutable thesis version without leaking future knowledge."""
 
+    if any(version.thesis_id != thesis.thesis_id for version in versions):
+        raise ValueError("versions must belong to supplied thesis")
     effective = ensure_utc(effective_at)
     known = ensure_utc(knowledge_time)
     base: _SelectionBase = {

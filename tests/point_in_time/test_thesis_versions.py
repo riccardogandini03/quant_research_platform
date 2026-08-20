@@ -1,6 +1,7 @@
 """Point-in-time thesis selection keeps effective and knowledge time separate."""
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 
@@ -136,3 +137,23 @@ def test_active_thesis_version_is_the_two_time_selector_wrapper(
         )
         == thesis_version
     )
+
+
+def test_rejects_foreign_thesis_versions_before_lifecycle_selection(
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    foreign = thesis_version.model_copy(
+        update={
+            "thesis_id": UUID("81818181-8181-4818-8818-818181818181"),
+            "version": 2,
+            "valid_from": datetime(2024, 1, 8, tzinfo=UTC),
+        }
+    )
+    with pytest.raises(ValueError, match="versions must belong to supplied thesis"):
+        select_thesis_version(
+            thesis,
+            (thesis_version, foreign),
+            effective_at=datetime(2024, 1, 9, tzinfo=UTC),
+            knowledge_time=datetime(2024, 1, 9, tzinfo=UTC),
+        )
