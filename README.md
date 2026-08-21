@@ -3,37 +3,12 @@
 Quant RaaS is an early-stage, point-in-time equity-research platform. It is
 designed to turn market and company observations into a small set of ranked,
 evidence-linked quantitative findings for a portfolio manager or analyst.
-Holdings are relevance context; this repository is not an order-management,
-execution, or accounting system.
-
-The repository is being built from [PLAN.md](PLAN.md). Interfaces and
-modules present in the tree are foundations, not a claim that every planned data
-source, screen, model, or UI is production-ready.
-
-## Current foundation
-
-The Phase 0/1 foundation covers or defines:
-
-- typed securities, identifiers, holdings, events, features, findings, and cards;
-- time-aware storage contracts and provider-neutral connector boundaries;
-- deterministic price normalization and quantitative calculations;
-- materiality and factor configuration examples;
-- point-in-time rules that prevent later vintages entering earlier snapshots;
-- SQLite development and PostgreSQL-compatible persistence foundations; and
-- network-free unit, integration, and point-in-time testing conventions.
-
-Estimate histories, licensed Bloomberg/LSEG feeds, filing/news synthesis, and
-production deployment remain dependent on implementation, entitlements, and
-validation. Disabled configuration files make those dependencies explicit.
 
 ## Requirements
 
 - Python 3.12 or 3.13
 - Git
 - Docker with Compose only if using the containerized development database
-
-Python 3.14 is intentionally outside the supported range until the numerical and
-vendor dependency set has been validated against it.
 
 ## Local setup
 
@@ -67,16 +42,6 @@ python -m pip install -e ".[dev,api,dashboard,postgres]"
 # Explicit prototype-only provider opt-in:
 python -m pip install -e ".[public-data]"
 ```
-
-| Extra | Purpose | Important limitation |
-|---|---|---|
-| `api` | FastAPI and Uvicorn composition | An API shell is not production security. |
-| `dashboard` | Streamlit and Plotly research UI | UI output is only as reliable as its typed inputs. |
-| `postgres` | PostgreSQL driver | A deployed database still needs backup and access controls. |
-| `calendar` | Exchange-session calendars | Calendar mappings must be validated per security. |
-| `public-data` | Opt-in Yahoo prototype connector | Not an authoritative production market-data feed. |
-| `lseg` | LSEG Data Library | Requires contracted entitlements and an approved session. |
-| `bloomberg` | Bloomberg integration boundary | Install the SDK through the approved Bloomberg channel. |
 
 See [vendor entitlements](docs/vendor_entitlements.md) before enabling an
 external connector. The default test suite never uses network or licensed feeds.
