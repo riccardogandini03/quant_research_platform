@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -158,11 +159,9 @@ class DailyResearchService:
             thesis_method_version=thesis_method_version,
         )
         run_id = stable_research_id("run", run_key)
-        run_config_version = (
-            "bundle:"
-            + hashlib.sha256(
-                f"{request.feature_config_version}|{thesis_method_version}".encode()
-            ).hexdigest()
+        run_config_version = _run_config_version(
+            request.feature_config_version,
+            thesis_method_version,
         )
         started_at = max(ensure_utc(self.clock()), cutoff)
 
@@ -507,7 +506,7 @@ def _run_key(
     *,
     thesis_method_version: str,
 ) -> str:
-    payload = "|".join(
+    payload = _canonical_json(
         [
             str(request.coverage_list_id),
             ensure_utc(request.as_of).isoformat(),
@@ -516,10 +515,19 @@ def _run_key(
             request.code_version,
             request.feature_config_version,
             thesis_method_version,
-            *(str(value) for value in batch_ids),
+            [str(value) for value in batch_ids],
         ]
     )
-    return f"daily:{hashlib.sha256(payload.encode()).hexdigest()}"
+    return f"daily:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _run_config_version(feature_config_version: str, thesis_method_version: str) -> str:
+    payload = _canonical_json([feature_config_version, thesis_method_version])
+    return f"bundle:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _group_bars(bars: Sequence[PriceBar]) -> dict[UUID, tuple[PriceBar, ...]]:

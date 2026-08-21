@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from quant_raas.common.errors import RepositoryConflictError
@@ -264,3 +264,169 @@ def test_panel_as_of_rejects_ambiguous_top_vintage(
             config_version="panel-v1",
             as_of=calculated,
         )
+
+
+def test_feature_vintage_uniqueness_is_scoped_to_research_run() -> None:
+    constraint = next(
+        constraint
+        for constraint in FeatureSnapshotRecord.__table__.constraints
+        if constraint.name == "uq_feature_snapshot_vintage"
+    )
+
+    assert tuple(column.name for column in constraint.columns) == (
+        "security_id",
+        "feature_name",
+        "feature_version",
+        "effective_at",
+        "available_at",
+        "code_version",
+        "config_version",
+        "research_run_id",
+    )
+
+
+def test_distinct_runs_persist_identical_vintages_and_resolve_deterministically(
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    second_run = research_run.model_copy(
+        update={"research_run_id": UUID(int=902), "run_key": "daily:2024-01-09:second"}
+    )
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_run(second_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    available = effective + timedelta(minutes=5)
+    calculated = available + timedelta(minutes=1)
+    first = _snapshot(
+        402,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=available,
+        calculated_at=calculated,
+        value=1.0,
+    )
+    second = _snapshot(
+        401,
+        security_id=sample_security.security_id,
+        research_run_id=second_run.research_run_id,
+        effective_at=effective,
+        available_at=available,
+        calculated_at=calculated,
+        value=1.0,
+    )
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+
+    assert repository.upsert_many([first, second]) == 2
+    stored = sqlite_session.scalars(
+        select(FeatureSnapshotRecord).where(
+            FeatureSnapshotRecord.feature_snapshot_id.in_(
+                [first.feature_snapshot_id, second.feature_snapshot_id]
+            )
+        )
+    ).all()
+    assert {(row.feature_snapshot_id, row.research_run_id) for row in stored} == {
+        (first.feature_snapshot_id, research_run.research_run_id),
+        (second.feature_snapshot_id, second_run.research_run_id),
+    }
+    assert repository.latest_as_of(
+        sample_security.security_id,
+        ["signal"],
+        effective_at=calculated,
+        knowledge_time=calculated,
+    ) == (second,)
+    assert repository.panel_as_of(
+        [sample_security.security_id],
+        {"signal": "v1"},
+        config_version="panel-v1",
+        as_of=calculated,
+    ) == (second,)
+
+
+def test_same_run_idempotent_upsert_rejects_a_different_snapshot_id(
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    available = effective + timedelta(minutes=5)
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+    first = _snapshot(
+        501,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=available,
+        value=1.0,
+    )
+    duplicate_key = first.model_copy(update={"feature_snapshot_id": UUID(int=502)})
+
+    assert repository.upsert_many([first]) == 1
+    with pytest.raises(RepositoryConflictError, match="different feature_snapshot_id"):
+        repository.upsert_many([duplicate_key])
+
+
+@pytest.mark.parametrize("method", ["latest_as_of", "panel_as_of"])
+def test_equal_precedence_vintages_with_divergent_content_are_rejected(
+    method: str,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    second_run = research_run.model_copy(
+        update={"research_run_id": UUID(int=602), "run_key": "daily:2024-01-09:divergent"}
+    )
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_run(second_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    available = effective + timedelta(minutes=5)
+    calculated = available + timedelta(minutes=1)
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+
+    assert (
+        repository.upsert_many(
+            [
+                _snapshot(
+                    601,
+                    security_id=sample_security.security_id,
+                    research_run_id=research_run.research_run_id,
+                    effective_at=effective,
+                    available_at=available,
+                    calculated_at=calculated,
+                    value=1.0,
+                ),
+                _snapshot(
+                    602,
+                    security_id=sample_security.security_id,
+                    research_run_id=second_run.research_run_id,
+                    effective_at=effective,
+                    available_at=available,
+                    calculated_at=calculated,
+                    value=2.0,
+                ),
+            ]
+        )
+        == 2
+    )
+    with pytest.raises(RepositoryConflictError, match="ambiguous latest feature vintage"):
+        if method == "latest_as_of":
+            repository.latest_as_of(
+                sample_security.security_id,
+                ["signal"],
+                effective_at=calculated,
+                knowledge_time=calculated,
+            )
+        else:
+            repository.panel_as_of(
+                [sample_security.security_id],
+                {"signal": "v1"},
+                config_version="panel-v1",
+                as_of=calculated,
+            )

@@ -8,6 +8,7 @@ from uuid import UUID, uuid5
 
 import pandas as pd
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quant_raas.connectors.fixture import FixturePriceProvider
@@ -20,6 +21,7 @@ from quant_raas.ingestion.prices import PriceIngestionService
 from quant_raas.research.materiality import MaterialityScorer
 from quant_raas.research.thesis import ThesisRelevanceEvaluator
 from quant_raas.services.daily_research import DailyResearchRequest, DailyResearchService
+from quant_raas.storage.models import FeatureSnapshotRecord
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
     SqlAlchemyMarketDataRepository,
@@ -613,3 +615,21 @@ def test_thesis_method_version_changes_immutable_run_lineage(
         first.cards[0].card_id,
         changed.cards[0].card_id,
     }
+    for result in (first, changed):
+        assessment = result.findings[0].thesis_relevance
+        assert assessment is not None
+        returned_ids = {feature.feature_snapshot_id for feature in result.features}
+        assessment_ids = {
+            feature_snapshot_id
+            for contribution in assessment.contributions
+            for feature_snapshot_id in contribution.feature_snapshot_ids
+        }
+        referenced_ids = returned_ids | assessment_ids
+        stored = sqlite_session.scalars(
+            select(FeatureSnapshotRecord).where(
+                FeatureSnapshotRecord.feature_snapshot_id.in_(referenced_ids)
+            )
+        ).all()
+        assert {row.feature_snapshot_id: row.research_run_id for row in stored} == dict.fromkeys(
+            referenced_ids, result.run.research_run_id
+        )

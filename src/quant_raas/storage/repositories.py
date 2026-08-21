@@ -818,9 +818,14 @@ class SqlAlchemyFeatureRepository:
                     FeatureSnapshotRecord.available_at == snapshot.available_at,
                     FeatureSnapshotRecord.code_version == snapshot.code_version,
                     FeatureSnapshotRecord.config_version == snapshot.config_version,
+                    FeatureSnapshotRecord.research_run_id == snapshot.research_run_id,
                 )
             )
             if existing:
+                if existing.feature_snapshot_id != snapshot.feature_snapshot_id:
+                    raise RepositoryConflictError(
+                        "feature snapshot natural key contains a different feature_snapshot_id"
+                    )
                 if existing.value != snapshot.value:
                     raise RepositoryConflictError(
                         "feature snapshot natural key contains a different value"
@@ -874,11 +879,23 @@ class SqlAlchemyFeatureRepository:
                 FeatureSnapshotRecord.effective_at.desc(),
                 FeatureSnapshotRecord.available_at.desc(),
                 FeatureSnapshotRecord.calculated_at.desc(),
+                FeatureSnapshotRecord.feature_snapshot_id,
+                FeatureSnapshotRecord.research_run_id,
             )
         )
         latest: dict[str, FeatureSnapshotRecord] = {}
         for row in self.session.scalars(statement):
-            latest.setdefault(row.feature_name, row)
+            selected = latest.get(row.feature_name)
+            if selected is None:
+                latest[row.feature_name] = row
+                continue
+            if _feature_precedence(row) != _feature_precedence(selected):
+                continue
+            if not _feature_semantically_equal(row, selected):
+                raise RepositoryConflictError(
+                    f"ambiguous latest feature vintage for security {row.security_id} "
+                    f"feature {row.feature_name!r}"
+                )
         return tuple(_feature_from_record(row) for row in latest.values())
 
     def panel_as_of(
@@ -944,6 +961,7 @@ class SqlAlchemyFeatureRepository:
                 FeatureSnapshotRecord.security_id,
                 FeatureSnapshotRecord.feature_name,
                 FeatureSnapshotRecord.feature_snapshot_id,
+                FeatureSnapshotRecord.research_run_id,
             )
         )
         latest: dict[tuple[UUID, str], FeatureSnapshotRecord] = {}
@@ -953,13 +971,9 @@ class SqlAlchemyFeatureRepository:
             if selected is None:
                 latest[key] = row
                 continue
-            precedence = (row.effective_at, row.available_at, row.calculated_at)
-            selected_precedence = (
-                selected.effective_at,
-                selected.available_at,
-                selected.calculated_at,
-            )
-            if precedence == selected_precedence:
+            if _feature_precedence(row) == _feature_precedence(
+                selected
+            ) and not _feature_semantically_equal(row, selected):
                 raise RepositoryConflictError(
                     f"ambiguous latest feature vintage for security {row.security_id} "
                     f"feature {row.feature_name!r}"
@@ -968,6 +982,47 @@ class SqlAlchemyFeatureRepository:
             _feature_from_record(latest[key])
             for key in sorted(latest, key=lambda item: (str(item[0]), item[1]))
         )
+
+
+def _feature_precedence(row: FeatureSnapshotRecord) -> tuple[Any, Any, Any]:
+    return (row.effective_at, row.available_at, row.calculated_at)
+
+
+def _feature_semantically_equal(
+    left: FeatureSnapshotRecord,
+    right: FeatureSnapshotRecord,
+) -> bool:
+    return (
+        left.security_id,
+        left.feature_name,
+        left.feature_version,
+        left.effective_at,
+        left.available_at,
+        left.calculated_at,
+        left.value,
+        left.unit,
+        left.window,
+        left.quality_flags,
+        left.input_evidence_ids,
+        left.code_version,
+        left.config_version,
+        left.metadata_json,
+    ) == (
+        right.security_id,
+        right.feature_name,
+        right.feature_version,
+        right.effective_at,
+        right.available_at,
+        right.calculated_at,
+        right.value,
+        right.unit,
+        right.window,
+        right.quality_flags,
+        right.input_evidence_ids,
+        right.code_version,
+        right.config_version,
+        right.metadata_json,
+    )
 
 
 def _feature_from_record(row: FeatureSnapshotRecord) -> FeatureSnapshot:

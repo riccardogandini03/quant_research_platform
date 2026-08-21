@@ -376,6 +376,7 @@ class FeatureSnapshotRecord(Base):
             "available_at",
             "code_version",
             "config_version",
+            "research_run_id",
             name="uq_feature_snapshot_vintage",
         ),
         Index(
