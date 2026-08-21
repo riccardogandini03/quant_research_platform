@@ -214,15 +214,17 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
                 and existing.title == title
                 and existing.status is ThesisStatus.ACTIVE
                 and existing.created_by == authored_by
-                and existing.created_at == demo_context_at
                 and len(history) == 1
                 and history[0].version == 1
-                and history[0].valid_from == demo_context_at
+                and history[0].valid_to is None
+                and existing.created_at
+                == history[0].valid_from
+                == history[0].approved_at
+                == history[0].created_at
+                <= demo_context_at
                 and history[0].content == content
                 and history[0].authored_by == authored_by
                 and history[0].approved_by == approved_by
-                and history[0].approved_at == demo_context_at
-                and history[0].created_at == demo_context_at
             ):
                 raise ValueError(f"existing demo thesis {thesis_key!r} differs from fixture")
 
