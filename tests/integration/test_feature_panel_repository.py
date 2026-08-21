@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from quant_raas.common.errors import RepositoryConflictError
+from quant_raas.domain.enums import DataQualityFlag
 from quant_raas.domain.market import FeatureSnapshot
 from quant_raas.domain.research import ResearchRun
 from quant_raas.domain.security import Security
@@ -21,6 +25,13 @@ from quant_raas.storage.repositories import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.point_in_time]
+
+
+class _CodedIntegrityCause(Exception):
+    def __init__(self, *, sqlite_errorcode: int | None = None, sqlstate: str | None = None) -> None:
+        super().__init__("constraint failure")
+        self.sqlite_errorcode = sqlite_errorcode
+        self.sqlstate = sqlstate
 
 
 def _snapshot(
@@ -50,6 +61,28 @@ def _snapshot(
         code_version=code_version,
         config_version=config_version,
     )
+
+
+def _assert_record_matches_snapshot(
+    record: FeatureSnapshotRecord,
+    snapshot: FeatureSnapshot,
+) -> None:
+    assert record.feature_snapshot_id == snapshot.feature_snapshot_id
+    assert record.security_id == snapshot.security_id
+    assert record.feature_name == snapshot.feature_name
+    assert record.feature_version == snapshot.feature_version
+    assert record.effective_at == snapshot.effective_at
+    assert record.available_at == snapshot.available_at
+    assert record.calculated_at == snapshot.calculated_at
+    assert record.value == snapshot.value
+    assert record.unit == snapshot.unit
+    assert record.window == snapshot.window
+    assert record.quality_flags == [flag.value for flag in snapshot.quality_flags]
+    assert record.input_evidence_ids == [str(value) for value in snapshot.input_evidence_ids]
+    assert record.research_run_id == snapshot.research_run_id
+    assert record.code_version == snapshot.code_version
+    assert record.config_version == snapshot.config_version
+    assert record.metadata_json == snapshot.metadata
 
 
 def test_panel_as_of_returns_latest_requested_vintage_for_each_security(
@@ -369,6 +402,287 @@ def test_same_run_idempotent_upsert_rejects_a_different_snapshot_id(
     assert repository.upsert_many([first]) == 1
     with pytest.raises(RepositoryConflictError, match="different feature_snapshot_id"):
         repository.upsert_many([duplicate_key])
+
+
+def test_exact_identical_feature_retry_is_idempotent(
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        551,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+
+    assert repository.upsert_many([snapshot]) == 1
+    assert repository.upsert_many([snapshot]) == 0
+    sqlite_session.expire_all()
+    stored = sqlite_session.get(FeatureSnapshotRecord, snapshot.feature_snapshot_id)
+    assert stored is not None
+    _assert_record_matches_snapshot(stored, snapshot)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "calculated_at",
+        "value",
+        "unit",
+        "window",
+        "quality_flags",
+        "input_evidence_ids",
+        "metadata",
+    ],
+)
+def test_same_identity_and_natural_key_rejects_any_persisted_payload_divergence(
+    field: str,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        561,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    divergent_values: dict[str, object] = {
+        "calculated_at": snapshot.calculated_at + timedelta(minutes=1),
+        "value": 2.0,
+        "unit": "percent",
+        "window": "20d",
+        "quality_flags": (DataQualityFlag.STALE,),
+        "input_evidence_ids": (UUID(int=999),),
+        "metadata": {"changed": True},
+    }
+    divergent = snapshot.model_copy(update={field: divergent_values[field]})
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+    assert repository.upsert_many([snapshot]) == 1
+
+    with pytest.raises(RepositoryConflictError, match="different persisted payload"):
+        repository.upsert_many([divergent])
+
+    assert sqlite_session.is_active
+    sqlite_session.expire_all()
+    stored = sqlite_session.get(FeatureSnapshotRecord, snapshot.feature_snapshot_id)
+    assert stored is not None
+    _assert_record_matches_snapshot(stored, snapshot)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "security_id",
+        "feature_name",
+        "feature_version",
+        "effective_at",
+        "available_at",
+        "code_version",
+        "config_version",
+        "research_run_id",
+    ],
+)
+def test_same_primary_id_on_a_different_natural_key_fails_closed(
+    field: str,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    second_security = sample_security.model_copy(
+        update={"security_id": UUID(int=572), "name": "Second Corp"}
+    )
+    second_run = research_run.model_copy(
+        update={"research_run_id": UUID(int=573), "run_key": "daily:feature-primary-conflict"}
+    )
+    securities = SqlAlchemySecurityRepository(sqlite_session)
+    securities.add_security(sample_security)
+    securities.add_security(second_security)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_run(second_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        571,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    divergent_values: dict[str, object] = {
+        "security_id": second_security.security_id,
+        "feature_name": "other_signal",
+        "feature_version": "v2",
+        "effective_at": snapshot.effective_at - timedelta(minutes=1),
+        "available_at": snapshot.available_at - timedelta(minutes=1),
+        "code_version": "code-v2",
+        "config_version": "panel-v2",
+        "research_run_id": second_run.research_run_id,
+    }
+    divergent = snapshot.model_copy(update={field: divergent_values[field]})
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+    assert repository.upsert_many([snapshot]) == 1
+
+    with pytest.raises(RepositoryConflictError, match="different persisted payload"):
+        repository.upsert_many([divergent])
+
+    assert sqlite_session.is_active
+    sqlite_session.expire_all()
+    stored = sqlite_session.get(FeatureSnapshotRecord, snapshot.feature_snapshot_id)
+    assert stored is not None
+    _assert_record_matches_snapshot(stored, snapshot)
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_UNIQUE),
+            id="sqlite-unique",
+        ),
+        pytest.param(_CodedIntegrityCause(sqlstate="23505"), id="postgres-unique"),
+    ],
+)
+def test_simulated_unique_race_is_translated_inside_savepoint(
+    cause: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        581,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    simulated_race = IntegrityError("INSERT", {}, cause)
+    original_flush: Callable[..., None] = sqlite_session.flush
+
+    def fail_pending_unique_flush(*args: object, **kwargs: object) -> None:
+        if sqlite_session.new:
+            raise simulated_race
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", fail_pending_unique_flush)
+
+    with pytest.raises(RepositoryConflictError) as raised:
+        SqlAlchemyFeatureRepository(sqlite_session).upsert_many([snapshot])
+
+    assert raised.value.__cause__ is simulated_race
+    assert sqlite_session.is_active
+    assert sqlite_session.scalar(select(func.count()).select_from(FeatureSnapshotRecord)) == 0
+
+
+def test_real_unique_race_is_translated_and_rolls_back_only_savepoint(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        591,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    original_flush: Callable[..., None] = sqlite_session.flush
+    injected = False
+
+    def inject_competing_row(*args: object, **kwargs: object) -> None:
+        nonlocal injected
+        if sqlite_session.new and not injected:
+            injected = True
+            sqlite_session.connection().execute(
+                FeatureSnapshotRecord.__table__.insert(),
+                {
+                    "feature_snapshot_id": UUID(int=592),
+                    "security_id": snapshot.security_id,
+                    "feature_name": snapshot.feature_name,
+                    "feature_version": snapshot.feature_version,
+                    "effective_at": snapshot.effective_at,
+                    "available_at": snapshot.available_at,
+                    "calculated_at": snapshot.calculated_at,
+                    "value": snapshot.value,
+                    "unit": snapshot.unit,
+                    "window": snapshot.window,
+                    "quality_flags": [],
+                    "input_evidence_ids": [],
+                    "research_run_id": snapshot.research_run_id,
+                    "code_version": snapshot.code_version,
+                    "config_version": snapshot.config_version,
+                    "metadata": {},
+                },
+            )
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", inject_competing_row)
+
+    with pytest.raises(RepositoryConflictError) as raised:
+        SqlAlchemyFeatureRepository(sqlite_session).upsert_many([snapshot])
+
+    assert isinstance(raised.value.__cause__, IntegrityError)
+    assert sqlite_session.is_active
+    assert sqlite_session.scalar(select(func.count()).select_from(FeatureSnapshotRecord)) == 0
+
+
+def test_non_unique_flush_failure_is_re_raised_without_poisoning_outer_session(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        596,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=1.0,
+    )
+    cause = _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_NOTNULL)
+    simulated_failure = IntegrityError("INSERT", {}, cause)
+    original_flush: Callable[..., None] = sqlite_session.flush
+
+    def fail_pending_non_unique_flush(*args: object, **kwargs: object) -> None:
+        if sqlite_session.new:
+            raise simulated_failure
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", fail_pending_non_unique_flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        SqlAlchemyFeatureRepository(sqlite_session).upsert_many([snapshot])
+
+    assert raised.value is simulated_failure
+    assert sqlite_session.is_active
+    assert sqlite_session.scalar(select(func.count()).select_from(FeatureSnapshotRecord)) == 0
 
 
 @pytest.mark.parametrize("method", ["latest_as_of", "panel_as_of"])

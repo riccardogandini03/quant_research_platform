@@ -808,51 +808,60 @@ class SqlAlchemyFeatureRepository:
 
     def upsert_many(self, snapshots: Iterable[FeatureSnapshot]) -> int:
         inserted = 0
-        for snapshot in snapshots:
-            existing = self.session.scalar(
-                select(FeatureSnapshotRecord).where(
-                    FeatureSnapshotRecord.security_id == snapshot.security_id,
-                    FeatureSnapshotRecord.feature_name == snapshot.feature_name,
-                    FeatureSnapshotRecord.feature_version == snapshot.feature_version,
-                    FeatureSnapshotRecord.effective_at == snapshot.effective_at,
-                    FeatureSnapshotRecord.available_at == snapshot.available_at,
-                    FeatureSnapshotRecord.code_version == snapshot.code_version,
-                    FeatureSnapshotRecord.config_version == snapshot.config_version,
-                    FeatureSnapshotRecord.research_run_id == snapshot.research_run_id,
-                )
-            )
-            if existing:
-                if existing.feature_snapshot_id != snapshot.feature_snapshot_id:
-                    raise RepositoryConflictError(
-                        "feature snapshot natural key contains a different feature_snapshot_id"
+        nested = self.session.begin_nested()
+        try:
+            with nested:
+                for snapshot in snapshots:
+                    existing_by_id = self.session.get(
+                        FeatureSnapshotRecord,
+                        snapshot.feature_snapshot_id,
                     )
-                if existing.value != snapshot.value:
-                    raise RepositoryConflictError(
-                        "feature snapshot natural key contains a different value"
+                    existing_by_natural_key = self.session.scalar(
+                        select(FeatureSnapshotRecord).where(
+                            FeatureSnapshotRecord.security_id == snapshot.security_id,
+                            FeatureSnapshotRecord.feature_name == snapshot.feature_name,
+                            FeatureSnapshotRecord.feature_version == snapshot.feature_version,
+                            FeatureSnapshotRecord.effective_at == snapshot.effective_at,
+                            FeatureSnapshotRecord.available_at == snapshot.available_at,
+                            FeatureSnapshotRecord.code_version == snapshot.code_version,
+                            FeatureSnapshotRecord.config_version == snapshot.config_version,
+                            FeatureSnapshotRecord.research_run_id == snapshot.research_run_id,
+                        )
                     )
-                continue
-            self.session.add(
-                FeatureSnapshotRecord(
-                    feature_snapshot_id=snapshot.feature_snapshot_id,
-                    security_id=snapshot.security_id,
-                    feature_name=snapshot.feature_name,
-                    feature_version=snapshot.feature_version,
-                    effective_at=snapshot.effective_at,
-                    available_at=snapshot.available_at,
-                    calculated_at=snapshot.calculated_at,
-                    value=snapshot.model_dump(mode="json")["value"],
-                    unit=snapshot.unit,
-                    window=snapshot.window,
-                    quality_flags=[flag.value for flag in snapshot.quality_flags],
-                    input_evidence_ids=_uuid_strings(snapshot.input_evidence_ids),
-                    research_run_id=snapshot.research_run_id,
-                    code_version=snapshot.code_version,
-                    config_version=snapshot.config_version,
-                    metadata_json=snapshot.model_dump(mode="json")["metadata"],
-                )
-            )
-            inserted += 1
-        self.session.flush()
+                    existing_records = {
+                        record.feature_snapshot_id: record
+                        for record in (existing_by_id, existing_by_natural_key)
+                        if record is not None
+                    }
+                    for existing in existing_records.values():
+                        if _feature_persisted_payload(existing) == _feature_persisted_payload(
+                            snapshot
+                        ):
+                            continue
+                        if (
+                            existing is existing_by_natural_key
+                            and existing.feature_snapshot_id != snapshot.feature_snapshot_id
+                        ):
+                            raise RepositoryConflictError(
+                                "feature snapshot natural key contains a different "
+                                "feature_snapshot_id"
+                            )
+                        raise RepositoryConflictError(
+                            "feature snapshot identity or natural key contains a different "
+                            "persisted payload"
+                        )
+                    if existing_records:
+                        continue
+                    record = _feature_record(snapshot)
+                    self.session.add(record)
+                    self.session.flush((record,))
+                    inserted += 1
+        except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
+            raise RepositoryConflictError(
+                "feature snapshot identity or natural key already exists"
+            ) from error
         return inserted
 
     def latest_as_of(
@@ -988,40 +997,53 @@ def _feature_precedence(row: FeatureSnapshotRecord) -> tuple[Any, Any, Any]:
     return (row.effective_at, row.available_at, row.calculated_at)
 
 
+def _feature_record(snapshot: FeatureSnapshot) -> FeatureSnapshotRecord:
+    payload = snapshot.model_dump(mode="json")
+    return FeatureSnapshotRecord(
+        feature_snapshot_id=snapshot.feature_snapshot_id,
+        security_id=snapshot.security_id,
+        feature_name=snapshot.feature_name,
+        feature_version=snapshot.feature_version,
+        effective_at=snapshot.effective_at,
+        available_at=snapshot.available_at,
+        calculated_at=snapshot.calculated_at,
+        value=payload["value"],
+        unit=snapshot.unit,
+        window=snapshot.window,
+        quality_flags=payload["quality_flags"],
+        input_evidence_ids=payload["input_evidence_ids"],
+        research_run_id=snapshot.research_run_id,
+        code_version=snapshot.code_version,
+        config_version=snapshot.config_version,
+        metadata_json=payload["metadata"],
+    )
+
+
+def _feature_persisted_payload(
+    feature: FeatureSnapshot | FeatureSnapshotRecord,
+    *,
+    include_identity: bool = True,
+) -> dict[str, Any]:
+    snapshot = (
+        _feature_from_record(feature) if isinstance(feature, FeatureSnapshotRecord) else feature
+    )
+    payload = snapshot.model_dump(mode="json")
+    if not include_identity:
+        payload.pop("feature_snapshot_id")
+        payload.pop("research_run_id")
+    return payload
+
+
 def _feature_semantically_equal(
     left: FeatureSnapshotRecord,
     right: FeatureSnapshotRecord,
 ) -> bool:
-    return (
-        left.security_id,
-        left.feature_name,
-        left.feature_version,
-        left.effective_at,
-        left.available_at,
-        left.calculated_at,
-        left.value,
-        left.unit,
-        left.window,
-        left.quality_flags,
-        left.input_evidence_ids,
-        left.code_version,
-        left.config_version,
-        left.metadata_json,
-    ) == (
-        right.security_id,
-        right.feature_name,
-        right.feature_version,
-        right.effective_at,
-        right.available_at,
-        right.calculated_at,
-        right.value,
-        right.unit,
-        right.window,
-        right.quality_flags,
-        right.input_evidence_ids,
-        right.code_version,
-        right.config_version,
-        right.metadata_json,
+    return _feature_persisted_payload(
+        left,
+        include_identity=False,
+    ) == _feature_persisted_payload(
+        right,
+        include_identity=False,
     )
 
 

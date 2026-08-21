@@ -348,6 +348,7 @@ def test_daily_pipeline_assesses_selected_thesis_with_stored_feature_lineage(
     assert assessment.score == pytest.approx(min(abs(float(stored_volume.value)) / 4.0, 1.0))
 
     assert second.run.research_run_id == first.run.research_run_id
+    assert second.features == first.features
     assert second.findings[0].finding_id == first.findings[0].finding_id
     assert second.cards[0].card_id == first.cards[0].card_id
     assert second.findings[0].thesis_relevance is not None

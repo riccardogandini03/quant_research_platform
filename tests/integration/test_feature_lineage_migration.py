@@ -54,6 +54,7 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
     security_id = UUID("11111111-1111-4111-8111-111111111111")
     run_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     feature_id = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    second_feature_id = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -137,7 +138,7 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
                 ":run,'code-v1','panel-v1',:metadata)"
             ),
             {
-                "id": str(UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")),
+                "id": str(second_feature_id),
                 "security": str(security_id),
                 "now": now,
                 "value": json.dumps(1.25),
@@ -148,6 +149,44 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
             },
         )
         assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 2
+
+    with pytest.raises(
+        RuntimeError,
+        match="cross-run duplicate feature vintages must be remediated",
+    ):
+        command.downgrade(config, "20260820_0002")
+
+    assert "_alembic_tmp_feature_snapshot" not in inspect(engine).get_table_names()
+    assert _unique_columns(engine) == NEW_COLUMNS
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "20260821_0003"
+        )
+        assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 2
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM feature_snapshot WHERE feature_snapshot_id=:id"),
+            {"id": str(second_feature_id)},
+        )
+
+    command.downgrade(config, "20260820_0002")
+
+    assert _unique_columns(engine) == OLD_COLUMNS
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "20260820_0002"
+        )
+        assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 1
+
+    command.upgrade(config, "head")
+
+    assert _unique_columns(engine) == NEW_COLUMNS
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "20260821_0003"
+        )
+        assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 1
 
     engine.dispose()
     get_settings.cache_clear()
