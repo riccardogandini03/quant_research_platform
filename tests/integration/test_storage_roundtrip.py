@@ -12,18 +12,27 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from quant_raas.config import Settings
-from quant_raas.domain.enums import BatchStatus
+from quant_raas.domain.enums import BatchStatus, ThesisImpact
 from quant_raas.domain.market import FeatureSnapshot, IngestionBatch, PriceBar
-from quant_raas.domain.research import EvidenceReference, ResearchRun
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchRun,
+    Thesis,
+    ThesisNodeContribution,
+    ThesisRelevanceAssessment,
+    ThesisVersion,
+)
 from quant_raas.domain.security import Security, SecurityIdentifier
 from quant_raas.research.cards import build_research_card
 from quant_raas.research.findings import PriceResearchSnapshot, build_price_finding
 from quant_raas.research.materiality import MaterialityScorer
+from quant_raas.storage.models import ResearchCardRecord, ResearchFindingRecord
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
     SqlAlchemyMarketDataRepository,
     SqlAlchemyResearchRepository,
     SqlAlchemySecurityRepository,
+    SqlAlchemyThesisRepository,
 )
 from quant_raas.storage.session import create_schema, create_session_factory, create_sql_engine
 
@@ -264,7 +273,104 @@ def test_research_repository_roundtrips_evidence_finding_and_card(
     assert stored[0].finding_ids == (finding.finding_id,)
     assert stored[0].evidence_ids == (evidence_reference.evidence_id,)
     assert stored[0].context.contribution_bps == pytest.approx(-14.0)
+    assert stored[0].thesis_version_id is None
+    assert stored[0].thesis_node_ids == ()
 
     # Natural keys make retries idempotent and avoid duplicate link-table rows.
-    assert repository.add_finding(finding).finding_id == finding.finding_id
+    stored_finding = repository.add_finding(finding)
+    assert stored_finding.finding_id == finding.finding_id
+    assert stored_finding.thesis_version_id is None
+    assert stored_finding.thesis_relevance is None
     assert repository.add_card(card).card_id == card.card_id
+
+
+def test_research_repository_roundtrips_typed_thesis_assessment_and_card_lineage(
+    sqlite_session: Session,
+    sample_security: Security,
+    sample_identifier: SecurityIdentifier,
+    research_run: ResearchRun,
+    evidence_reference: EvidenceReference,
+    materiality_scorer: MaterialityScorer,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    securities = SqlAlchemySecurityRepository(sqlite_session)
+    securities.add_security(sample_security)
+    securities.add_identifier(sample_identifier)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_evidence(evidence_reference)
+    theses = SqlAlchemyThesisRepository(sqlite_session)
+    theses.add_thesis(thesis)
+    theses.add_version(thesis_version, expected_version=0)
+
+    assessment = ThesisRelevanceAssessment(
+        thesis_id=thesis.thesis_id,
+        thesis_version_id=thesis_version.thesis_version_id,
+        score=0.75,
+        impact=ThesisImpact.HIGH,
+        primary_node_id="volume_risk",
+        contributions=(
+            ThesisNodeContribution(
+                node_id="relative_break",
+                node_kind="invalidation_rule",
+                score=0.0,
+                matched_feature_names=("relative_return_sector_63d",),
+            ),
+            ThesisNodeContribution(
+                node_id="volume_risk",
+                node_kind="risk",
+                score=0.75,
+                matched_feature_names=("dollar_volume_zscore_20d",),
+            ),
+        ),
+        method_version="thesis-relevance-v1",
+    )
+    snapshot = PriceResearchSnapshot(
+        security_id=sample_security.security_id,
+        as_of=research_run.as_of,
+        available_at=evidence_reference.available_at,
+        created_at=research_run.started_at,
+        daily_return=-0.04,
+        residual_return=-0.03,
+        residual_zscore=-3.0,
+        volume_zscore=2.0,
+        realized_volatility_20d=0.30,
+        beta_126d=1.2,
+        relative_return_sector_63d=-0.10,
+        observations=252,
+        evidence_ids=(evidence_reference.evidence_id,),
+    )
+    finding = build_price_finding(
+        snapshot,
+        research_run_id=research_run.research_run_id,
+        scorer=materiality_scorer,
+        thesis_assessment=assessment,
+    )
+    research.add_finding(finding)
+    card = build_research_card(
+        [finding],
+        research_run_id=research_run.research_run_id,
+        security_id=sample_security.security_id,
+        as_of=research_run.as_of,
+        data_cutoff_at=research_run.data_cutoff_at,
+        created_at=research_run.started_at,
+    )
+    research.add_card(card)
+    sqlite_session.flush()
+    sqlite_session.expunge_all()
+
+    stored_finding = research.add_finding(finding)
+    stored_card = research.add_card(card)
+    assert stored_finding.thesis_version_id == thesis_version.thesis_version_id
+    assert stored_finding.thesis_relevance == assessment
+    assert isinstance(stored_finding.thesis_relevance, ThesisRelevanceAssessment)
+    assert stored_card.thesis_version_id == thesis_version.thesis_version_id
+    assert stored_card.thesis_node_ids == ("relative_break", "volume_risk")
+
+    finding_record = sqlite_session.get(ResearchFindingRecord, finding.finding_id)
+    card_record = sqlite_session.get(ResearchCardRecord, card.card_id)
+    assert finding_record is not None
+    assert card_record is not None
+    assert finding_record.thesis_relevance == assessment.model_dump(mode="json")
+    assert card_record.thesis_node_ids == ["relative_break", "volume_risk"]

@@ -15,11 +15,23 @@ from sqlalchemy.orm import Session
 
 from quant_raas.common.errors import RepositoryConflictError
 from quant_raas.config import Settings
-from quant_raas.domain.enums import ThesisSelectionStatus, ThesisStatus
-from quant_raas.domain.research import Thesis, ThesisContent, ThesisVersion
+from quant_raas.domain.enums import ThesisImpact, ThesisSelectionStatus, ThesisStatus
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchRun,
+    Thesis,
+    ThesisContent,
+    ThesisNodeContribution,
+    ThesisRelevanceAssessment,
+    ThesisVersion,
+)
 from quant_raas.domain.security import Security
+from quant_raas.research.cards import build_research_card
+from quant_raas.research.findings import PriceResearchSnapshot, build_price_finding
+from quant_raas.research.materiality import MaterialityScorer
 from quant_raas.storage.models import ThesisVersionRecord
 from quant_raas.storage.repositories import (
+    SqlAlchemyResearchRepository,
     SqlAlchemySecurityRepository,
     SqlAlchemyThesisRepository,
 )
@@ -494,3 +506,80 @@ def test_locked_refresh_rejects_stale_append_after_concurrent_archive(
         session_a.close()
         session_b.close()
         engine.dispose()
+
+
+def test_thesis_version_delete_is_restricted_by_persisted_research_lineage(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    research_run: ResearchRun,
+    evidence_reference: EvidenceReference,
+    materiality_scorer: MaterialityScorer,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    theses = SqlAlchemyThesisRepository(sqlite_session)
+    theses.add_thesis(thesis)
+    theses.add_version(thesis_version, expected_version=0)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_evidence(evidence_reference)
+    assessment = ThesisRelevanceAssessment(
+        thesis_id=thesis.thesis_id,
+        thesis_version_id=thesis_version.thesis_version_id,
+        score=0.75,
+        impact=ThesisImpact.HIGH,
+        primary_node_id="volume_risk",
+        contributions=(
+            ThesisNodeContribution(
+                node_id="volume_risk",
+                node_kind="risk",
+                score=0.75,
+                matched_feature_names=("dollar_volume_zscore_20d",),
+            ),
+        ),
+        method_version="thesis-relevance-v1",
+    )
+    finding = build_price_finding(
+        PriceResearchSnapshot(
+            security_id=sample_security.security_id,
+            as_of=research_run.as_of,
+            available_at=evidence_reference.available_at,
+            created_at=research_run.started_at,
+            daily_return=-0.04,
+            residual_return=-0.03,
+            residual_zscore=-3.0,
+            volume_zscore=2.0,
+            realized_volatility_20d=0.30,
+            beta_126d=1.2,
+            relative_return_sector_63d=-0.10,
+            observations=252,
+            evidence_ids=(evidence_reference.evidence_id,),
+        ),
+        research_run_id=research_run.research_run_id,
+        scorer=materiality_scorer,
+        thesis_assessment=assessment,
+    )
+    research.add_finding(finding)
+    research.add_card(
+        build_research_card(
+            [finding],
+            research_run_id=research_run.research_run_id,
+            security_id=sample_security.security_id,
+            as_of=research_run.as_of,
+            data_cutoff_at=research_run.data_cutoff_at,
+            created_at=research_run.started_at,
+        )
+    )
+    sqlite_session.flush()
+
+    stored_version = sqlite_session.get(ThesisVersionRecord, thesis_version.thesis_version_id)
+    assert stored_version is not None
+    sqlite_session.delete(stored_version)
+    with pytest.raises(IntegrityError) as raised:
+        sqlite_session.flush()
+
+    assert raised.value.orig.sqlite_errorcode in {
+        sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
+        sqlite3.SQLITE_CONSTRAINT_TRIGGER,
+    }

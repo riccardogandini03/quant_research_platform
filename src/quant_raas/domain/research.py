@@ -143,6 +143,8 @@ class ResearchFinding(DomainModel):
     materiality_tier: MaterialityTier
     confidence: ConfidenceLevel
     portfolio_weight: float | None = None
+    thesis_version_id: UUID | None = None
+    thesis_relevance: ThesisRelevanceAssessment | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -150,6 +152,11 @@ class ResearchFinding(DomainModel):
         # Upcoming earnings can generate a valid risk finding before event time.
         if self.available_at > self.created_at:
             raise ValueError("available_at cannot be later than created_at")
+        if self.thesis_relevance is None:
+            if self.thesis_version_id is not None:
+                raise ValueError("thesis_version_id requires thesis_relevance")
+        elif self.thesis_version_id != self.thesis_relevance.thesis_version_id:
+            raise ValueError("thesis relevance and thesis_version_id must match")
         return self
 
 
@@ -180,6 +187,8 @@ class ResearchCard(DomainModel):
     context: CardContext = Field(default_factory=CardContext)
     thesis_impact: ThesisImpact = ThesisImpact.NONE
     thesis_node_id: str | None = Field(default=None, max_length=128)
+    thesis_version_id: UUID | None = None
+    thesis_node_ids: tuple[str, ...] = ()
     key_risk_or_opportunity: str | None = Field(default=None, max_length=1000)
     confidence: ConfidenceLevel
     next_research_question: str | None = Field(default=None, max_length=1000)
@@ -194,6 +203,18 @@ class ResearchCard(DomainModel):
     def validate_card_timing(self) -> ResearchCard:
         if self.as_of > self.data_cutoff_at or self.data_cutoff_at > self.created_at:
             raise ValueError("card timing must satisfy as_of <= data_cutoff_at <= created_at")
+        if self.thesis_node_ids != tuple(sorted(set(self.thesis_node_ids))):
+            raise ValueError("thesis_node_ids must be sorted and unique")
+        if self.thesis_node_id is not None and self.thesis_node_id not in self.thesis_node_ids:
+            raise ValueError("primary thesis node must belong to thesis_node_ids")
+        if self.thesis_version_id is None and (
+            self.thesis_node_id is not None or self.thesis_node_ids
+        ):
+            raise ValueError("thesis nodes require thesis_version_id")
+        if self.thesis_impact is not ThesisImpact.NONE and (
+            self.thesis_version_id is None or self.thesis_node_id is None
+        ):
+            raise ValueError("non-NONE thesis impact requires a thesis version and primary node")
         return self
 
 
@@ -473,6 +494,9 @@ class ThesisVersionSelection(DomainModel):
         if self.version is not None and self.version.thesis_id != self.thesis_id:
             raise ValueError("selected version belongs to thesis_id only when identities match")
         return self
+
+
+ResearchFinding.model_rebuild()
 
 
 class MaterialityFeedback(DomainModel):

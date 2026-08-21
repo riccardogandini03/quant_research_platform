@@ -1262,6 +1262,8 @@ class SqlAlchemyResearchRepository:
                 materiality_tier=finding.materiality_tier.value,
                 confidence=finding.confidence.value,
                 portfolio_weight=finding.portfolio_weight,
+                thesis_version_id=finding.thesis_version_id,
+                thesis_relevance=payload["thesis_relevance"],
                 metadata_json=payload["metadata"],
             )
         )
@@ -1295,6 +1297,8 @@ class SqlAlchemyResearchRepository:
                 context=payload["context"],
                 thesis_impact=card.thesis_impact.value,
                 thesis_node_id=card.thesis_node_id,
+                thesis_version_id=card.thesis_version_id,
+                thesis_node_ids=list(card.thesis_node_ids),
                 key_risk_or_opportunity=card.key_risk_or_opportunity,
                 confidence=card.confidence.value,
                 next_research_question=card.next_research_question,
@@ -1419,6 +1423,8 @@ def _finding_from_record(row: ResearchFindingRecord) -> ResearchFinding:
             "materiality_tier": row.materiality_tier,
             "confidence": row.confidence,
             "portfolio_weight": row.portfolio_weight,
+            "thesis_version_id": row.thesis_version_id,
+            "thesis_relevance": row.thesis_relevance,
             "metadata": row.metadata_json,
         }
     )
@@ -1439,6 +1445,8 @@ def _card_from_record(row: ResearchCardRecord) -> ResearchCard:
             "context": row.context,
             "thesis_impact": row.thesis_impact,
             "thesis_node_id": row.thesis_node_id,
+            "thesis_version_id": row.thesis_version_id,
+            "thesis_node_ids": row.thesis_node_ids or [],
             "key_risk_or_opportunity": row.key_risk_or_opportunity,
             "confidence": row.confidence,
             "next_research_question": row.next_research_question,
