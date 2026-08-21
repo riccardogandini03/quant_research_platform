@@ -6,6 +6,7 @@ transaction, allowing a CSV import or daily research run to remain atomic.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -81,6 +82,19 @@ def _enum_value(value: Any) -> Any:
 
 def _uuid_strings(values: Iterable[UUID]) -> list[str]:
     return [str(value) for value in values]
+
+
+def _is_unique_integrity_error(error: IntegrityError) -> bool:
+    original = error.orig
+    if "23505" in (
+        getattr(original, "sqlstate", None),
+        getattr(original, "pgcode", None),
+    ):
+        return True
+    return getattr(original, "sqlite_errorcode", None) in {
+        sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+        sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
+    }
 
 
 def _security_from_record(record: SecurityRecord) -> Security:
@@ -1006,6 +1020,8 @@ class SqlAlchemyThesisRepository:
         try:
             self.session.flush((record,))
         except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
             raise RepositoryConflictError(
                 f"thesis key {thesis.thesis_key!r} already exists"
             ) from error
@@ -1091,6 +1107,8 @@ class SqlAlchemyThesisRepository:
         try:
             self.session.flush((record,))
         except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
             raise RepositoryConflictError(
                 f"thesis {version.thesis_id} version {version.version} already exists"
             ) from error

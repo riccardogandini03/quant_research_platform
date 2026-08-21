@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,20 @@ from quant_raas.storage.session import create_schema, create_session_factory, cr
 SECOND_THESIS_ID = UUID("73737373-7373-4737-8737-737373737373")
 SECOND_VERSION_ID = UUID("74747474-7474-4747-8747-747474747474")
 ARCHIVED_AT = datetime(2024, 1, 12, tzinfo=UTC)
+
+
+class _CodedIntegrityCause(Exception):
+    def __init__(
+        self,
+        *,
+        sqlite_errorcode: int | None = None,
+        sqlstate: str | None = None,
+        pgcode: str | None = None,
+    ) -> None:
+        super().__init__("constraint failure")
+        self.sqlite_errorcode = sqlite_errorcode
+        self.sqlstate = sqlstate
+        self.pgcode = pgcode
 
 
 def _persist_security(session: Session, security: Security) -> None:
@@ -98,6 +113,19 @@ def test_duplicate_public_key_raises_the_exact_repository_conflict(
         match=r"thesis key 'example_core' already exists",
     ):
         repository.add_thesis(duplicate)
+
+
+def test_missing_security_foreign_key_integrity_error_is_not_mislabeled(
+    sqlite_session: Session,
+    thesis: Thesis,
+) -> None:
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+
+    with pytest.raises(IntegrityError) as raised:
+        repository.add_thesis(thesis)
+
+    assert not isinstance(raised.value, RepositoryConflictError)
+    assert raised.value.orig.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
 
 
 def test_identity_listing_is_stable_and_excludes_archived_by_default(
@@ -321,6 +349,21 @@ def test_archive_leaves_rollback_to_the_caller(
 
 
 @pytest.mark.parametrize("operation", ["identity", "version"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_UNIQUE),
+            id="sqlite-unique",
+        ),
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY),
+            id="sqlite-primary-key",
+        ),
+        pytest.param(_CodedIntegrityCause(sqlstate="23505"), id="postgres-sqlstate"),
+        pytest.param(_CodedIntegrityCause(pgcode="23505"), id="postgres-legacy-pgcode"),
+    ],
+)
 def test_unique_flush_races_are_translated_with_integrity_error_as_cause(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session: Session,
@@ -328,12 +371,13 @@ def test_unique_flush_races_are_translated_with_integrity_error_as_cause(
     thesis: Thesis,
     thesis_version: ThesisVersion,
     operation: str,
+    cause: Exception,
 ) -> None:
     _persist_security(sqlite_session, sample_security)
     repository = SqlAlchemyThesisRepository(sqlite_session)
     if operation == "version":
         repository.add_thesis(thesis)
-    simulated_race = IntegrityError("INSERT", {}, Exception("unique constraint"))
+    simulated_race = IntegrityError("INSERT", {}, cause)
     original_flush: Callable[..., None] = sqlite_session.flush
 
     def fail_pending_unique_flush(*args: object, **kwargs: object) -> None:
@@ -350,6 +394,54 @@ def test_unique_flush_races_are_translated_with_integrity_error_as_cause(
             repository.add_version(thesis_version, expected_version=0)
 
     assert raised.value.__cause__ is simulated_race
+
+
+@pytest.mark.parametrize("operation", ["identity", "version"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_NOTNULL),
+            id="sqlite-not-null",
+        ),
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_CHECK),
+            id="sqlite-check",
+        ),
+        pytest.param(_CodedIntegrityCause(sqlstate="23503"), id="postgres-foreign-key"),
+        pytest.param(_CodedIntegrityCause(), id="unknown"),
+    ],
+)
+def test_unrelated_integrity_flush_failures_are_re_raised_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    operation: str,
+    cause: Exception,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    if operation == "version":
+        repository.add_thesis(thesis)
+    simulated_failure = IntegrityError("INSERT", {}, cause)
+    original_flush: Callable[..., None] = sqlite_session.flush
+
+    def fail_pending_integrity_flush(*args: object, **kwargs: object) -> None:
+        if sqlite_session.new:
+            raise simulated_failure
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", fail_pending_integrity_flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        if operation == "identity":
+            repository.add_thesis(thesis)
+        else:
+            repository.add_version(thesis_version, expected_version=0)
+
+    assert raised.value is simulated_failure
 
 
 def test_locked_refresh_rejects_stale_append_after_concurrent_archive(
