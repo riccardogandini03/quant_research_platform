@@ -54,6 +54,7 @@ def _master(session: Session) -> SecurityMasterService:
     return SecurityMasterService(
         repos.securities,
         repos.portfolios,
+        repos.theses,
         default_benchmark_identifier=settings.default_benchmark_identifier,
         sector_benchmark_identifiers=settings.sector_benchmark_identifiers,
     )

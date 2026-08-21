@@ -152,6 +152,7 @@ with upload_tab:
                 service = SecurityMasterService(
                     repos.securities,
                     repos.portfolios,
+                    repos.theses,
                     default_benchmark_identifier=settings.default_benchmark_identifier,
                     sector_benchmark_identifiers=settings.sector_benchmark_identifiers,
                 )
