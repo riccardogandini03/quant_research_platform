@@ -29,7 +29,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from quant_raas.storage.base import Base, UTCDateTime
+from quant_raas.storage.base import Base, FeatureValueJSON, UTCDateTime
 
 
 class SecurityRecord(Base):
@@ -397,7 +397,7 @@ class FeatureSnapshotRecord(Base):
     effective_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     available_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     calculated_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
-    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    value: Mapped[Any] = mapped_column(FeatureValueJSON(), nullable=False)
     unit: Mapped[str | None] = mapped_column(String(40))
     window: Mapped[str | None] = mapped_column(String(80))
     quality_flags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)

@@ -8,12 +8,12 @@ from uuid import UUID, uuid5
 
 import pandas as pd
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from quant_raas.connectors.fixture import FixturePriceProvider
 from quant_raas.domain.enums import BatchStatus, ThesisRiskSeverity
-from quant_raas.domain.market import PriceBarRequest, PriceRequestItem
+from quant_raas.domain.market import FeatureSnapshot, PriceBarRequest, PriceRequestItem
 from quant_raas.domain.portfolio import CoverageList, CoverageMember
 from quant_raas.domain.research import Thesis, ThesisContent, ThesisRisk, ThesisVersion
 from quant_raas.domain.security import Security
@@ -21,7 +21,12 @@ from quant_raas.ingestion.prices import PriceIngestionService
 from quant_raas.research.materiality import MaterialityScorer
 from quant_raas.research.thesis import ThesisRelevanceEvaluator
 from quant_raas.services.daily_research import DailyResearchRequest, DailyResearchService
-from quant_raas.storage.models import FeatureSnapshotRecord
+from quant_raas.storage.models import (
+    FeatureSnapshotRecord,
+    ResearchCardRecord,
+    ResearchFindingRecord,
+    ResearchRunRecord,
+)
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
     SqlAlchemyMarketDataRepository,
@@ -55,6 +60,7 @@ class _PipelineHarness:
         self,
         *,
         evaluator: ThesisRelevanceEvaluator | None = None,
+        clock_at: datetime | None = None,
     ) -> DailyResearchService:
         return DailyResearchService(
             securities=self.securities,
@@ -65,7 +71,7 @@ class _PipelineHarness:
             research=self.research,
             materiality=self.materiality,
             thesis_relevance=evaluator or self.thesis_relevance,
-            clock=lambda: self.fixed_now,
+            clock=lambda: clock_at or self.fixed_now,
         )
 
 
@@ -222,6 +228,30 @@ def _request(
     )
 
 
+def _assert_stored_feature_matches(
+    record: FeatureSnapshotRecord,
+    snapshot: FeatureSnapshot,
+) -> None:
+    payload = snapshot.model_dump(mode="json")
+    assert record.feature_snapshot_id == snapshot.feature_snapshot_id
+    assert record.security_id == snapshot.security_id
+    assert record.feature_name == snapshot.feature_name
+    assert record.feature_version == snapshot.feature_version
+    assert record.effective_at == snapshot.effective_at
+    assert record.available_at == snapshot.available_at
+    assert record.calculated_at == snapshot.calculated_at
+    assert type(record.value) is type(payload["value"])
+    assert record.value == payload["value"]
+    assert record.unit == snapshot.unit
+    assert record.window == snapshot.window
+    assert record.quality_flags == payload["quality_flags"]
+    assert record.input_evidence_ids == payload["input_evidence_ids"]
+    assert record.research_run_id == snapshot.research_run_id
+    assert record.code_version == snapshot.code_version
+    assert record.config_version == snapshot.config_version
+    assert record.metadata_json == payload["metadata"]
+
+
 @pytest.mark.point_in_time
 def test_daily_pipeline_without_thesis_is_cutoff_safe_and_idempotent(
     sqlite_session: Session,
@@ -355,6 +385,66 @@ def test_daily_pipeline_assesses_selected_thesis_with_stored_feature_lineage(
     assert second.findings[0].thesis_relevance.model_dump(mode="json") == assessment.model_dump(
         mode="json"
     )
+
+
+@pytest.mark.point_in_time
+def test_daily_pipeline_retry_reuses_persisted_operational_timestamps(
+    sqlite_session: Session,
+    sample_security: Security,
+    fixed_now: datetime,
+    materiality_scorer: MaterialityScorer,
+    thesis_relevance_evaluator: ThesisRelevanceEvaluator,
+) -> None:
+    harness = _pipeline_harness(
+        sqlite_session,
+        fixed_now=fixed_now,
+        materiality=materiality_scorer,
+        thesis_relevance=thesis_relevance_evaluator,
+    )
+    harness.securities.add_security(sample_security)
+    _persist_thesis(
+        harness,
+        thesis_key="clock_retry_core",
+        security_id=sample_security.security_id,
+        created_at=AS_OF - timedelta(days=5),
+        valid_from=AS_OF - timedelta(days=5),
+        approved_at=AS_OF - timedelta(days=5),
+    )
+    coverage = _add_coverage(
+        harness,
+        name="Clock-advanced retry coverage",
+        members=((sample_security, "clock_retry_core"),),
+    )
+    _ingest_prices(harness, (sample_security,))
+    request = _request(coverage, cutoff=fixed_now)
+
+    first = harness.service(clock_at=fixed_now).run(request)
+    later = harness.service(clock_at=fixed_now + timedelta(seconds=1)).run(request)
+
+    assert later == first
+    assert later.run.started_at == first.run.started_at == fixed_now
+    assert later.run.completed_at == first.run.completed_at == fixed_now
+    assert later.findings[0].thesis_relevance is not None
+    assert later.findings[0].thesis_relevance == first.findings[0].thesis_relevance
+    assert sqlite_session.scalar(select(func.count()).select_from(ResearchRunRecord)) == 1
+    assert sqlite_session.scalar(select(func.count()).select_from(FeatureSnapshotRecord)) == len(
+        first.features
+    )
+    assert sqlite_session.scalar(select(func.count()).select_from(ResearchFindingRecord)) == 1
+    assert sqlite_session.scalar(select(func.count()).select_from(ResearchCardRecord)) == 1
+    assert harness.research.run_by_key(first.run.run_key) == first.run
+
+    stored = sqlite_session.scalars(
+        select(FeatureSnapshotRecord).where(
+            FeatureSnapshotRecord.research_run_id == first.run.research_run_id
+        )
+    ).all()
+    assert {row.feature_snapshot_id for row in stored} == {
+        feature.feature_snapshot_id for feature in first.features
+    }
+    returned = {feature.feature_snapshot_id: feature for feature in later.features}
+    for row in stored:
+        _assert_stored_feature_matches(row, returned[row.feature_snapshot_id])
 
 
 def test_selected_thesis_without_overlap_adds_explicit_zero_component(

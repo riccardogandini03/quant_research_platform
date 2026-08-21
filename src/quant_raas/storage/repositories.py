@@ -6,6 +6,7 @@ transaction, allowing a CSV import or daily research run to remain atomic.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
@@ -1023,7 +1024,7 @@ def _feature_persisted_payload(
     feature: FeatureSnapshot | FeatureSnapshotRecord,
     *,
     include_identity: bool = True,
-) -> dict[str, Any]:
+) -> str:
     snapshot = (
         _feature_from_record(feature) if isinstance(feature, FeatureSnapshotRecord) else feature
     )
@@ -1031,7 +1032,17 @@ def _feature_persisted_payload(
     if not include_identity:
         payload.pop("feature_snapshot_id")
         payload.pop("research_run_id")
-    return payload
+    return _canonical_json_payload(payload)
+
+
+def _canonical_json_payload(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _feature_semantically_equal(
@@ -1256,12 +1267,24 @@ class SqlAlchemyResearchRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def add_run(self, run: ResearchRun) -> ResearchRun:
-        existing = self.session.scalar(
-            select(ResearchRunRecord).where(ResearchRunRecord.run_key == run.run_key)
+    def run_by_key(self, run_key: str) -> ResearchRun | None:
+        record = self.session.scalar(
+            select(ResearchRunRecord).where(ResearchRunRecord.run_key == run_key)
         )
-        if existing:
-            return _run_from_record(existing)
+        return _run_from_record(record) if record is not None else None
+
+    def add_run(self, run: ResearchRun) -> ResearchRun:
+        existing = self.run_by_key(run.run_key)
+        if existing is not None:
+            if existing.research_run_id != run.research_run_id:
+                raise RepositoryConflictError(
+                    "research run key contains a different research_run_id"
+                )
+            if existing != run:
+                raise RepositoryConflictError(
+                    "research run key contains a different persisted payload"
+                )
+            return existing
         self.session.add(
             ResearchRunRecord(
                 research_run_id=run.research_run_id,

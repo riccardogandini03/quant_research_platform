@@ -13,7 +13,7 @@ from uuid import UUID
 import pandas as pd
 
 from quant_raas.common.clock import ensure_utc, utc_now
-from quant_raas.common.errors import QuantRaasError
+from quant_raas.common.errors import QuantRaasError, RepositoryConflictError
 from quant_raas.domain.enums import BatchStatus, BenchmarkKind
 from quant_raas.domain.market import FeatureSnapshot, PriceBar
 from quant_raas.domain.portfolio import CoverageMember
@@ -163,7 +163,21 @@ class DailyResearchService:
             request.feature_config_version,
             thesis_method_version,
         )
-        started_at = max(ensure_utc(self.clock()), cutoff)
+        existing_run = self.research_repository.run_by_key(run_key)
+        if existing_run is None:
+            started_at = max(ensure_utc(self.clock()), cutoff)
+        else:
+            _validate_reusable_run(
+                existing_run,
+                research_run_id=run_id,
+                run_key=run_key,
+                as_of=as_of,
+                data_cutoff_at=cutoff,
+                code_version=request.code_version,
+                config_version=run_config_version,
+                ingestion_batch_ids=batch_ids,
+            )
+            started_at = existing_run.started_at
 
         calculations: list[
             tuple[CoverageMember, _SecurityCalculation, ThesisRelevanceAssessment | None]
@@ -220,7 +234,11 @@ class DailyResearchService:
             feature_snapshots.extend(calculation.features)
             evidence_by_id.update({item.evidence_id: item for item in calculation.evidence})
 
-        completed_at = max(ensure_utc(self.clock()), started_at)
+        completed_at = (
+            max(ensure_utc(self.clock()), started_at)
+            if existing_run is None
+            else existing_run.completed_at
+        )
         status = (
             BatchStatus.FAILED
             if not cards
@@ -498,6 +516,34 @@ class DailyResearchService:
             benchmark_return=market_daily,
             sector_return=sector_daily,
         )
+
+
+def _validate_reusable_run(
+    existing: ResearchRun,
+    *,
+    research_run_id: UUID,
+    run_key: str,
+    as_of: datetime,
+    data_cutoff_at: datetime,
+    code_version: str,
+    config_version: str,
+    ingestion_batch_ids: tuple[UUID, ...],
+) -> None:
+    expected_fields: tuple[tuple[str, object], ...] = (
+        ("research_run_id", research_run_id),
+        ("run_key", run_key),
+        ("run_type", "daily"),
+        ("as_of", as_of),
+        ("data_cutoff_at", data_cutoff_at),
+        ("code_version", code_version),
+        ("config_version", config_version),
+        ("ingestion_batch_ids", ingestion_batch_ids),
+    )
+    for field, expected in expected_fields:
+        if getattr(existing, field) != expected:
+            raise RepositoryConflictError(f"research run key contains a different {field}")
+    if existing.completed_at is None:
+        raise RepositoryConflictError("research run key identifies an incomplete persisted run")
 
 
 def _run_key(

@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from quant_raas.common.errors import RepositoryConflictError
 from quant_raas.config import Settings
 from quant_raas.domain.enums import BatchStatus, ThesisImpact
 from quant_raas.domain.market import FeatureSnapshot, IngestionBatch, PriceBar
@@ -37,6 +38,24 @@ from quant_raas.storage.repositories import (
 from quant_raas.storage.session import create_schema, create_session_factory, create_sql_engine
 
 pytestmark = pytest.mark.integration
+
+
+def test_research_repository_finds_run_by_key_and_rejects_mismatched_identity(
+    sqlite_session: Session,
+    research_run: ResearchRun,
+) -> None:
+    repository = SqlAlchemyResearchRepository(sqlite_session)
+
+    assert repository.run_by_key("daily:missing") is None
+    assert repository.add_run(research_run) == research_run
+    assert repository.run_by_key(research_run.run_key) == research_run
+
+    mismatched = research_run.model_copy(update={"research_run_id": UUID(int=9999)})
+    with pytest.raises(RepositoryConflictError, match="different research_run_id"):
+        repository.add_run(mismatched)
+
+    assert sqlite_session.is_active
+    assert repository.run_by_key(research_run.run_key) == research_run
 
 
 def test_in_memory_sqlite_schema_is_shared_across_api_threads() -> None:

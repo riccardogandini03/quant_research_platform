@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import DateTime, MetaData
+from sqlalchemy import JSON, DateTime, MetaData
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import TypeDecorator
 
@@ -41,6 +42,24 @@ class UTCDateTime(TypeDecorator[datetime]):
         if value.tzinfo is None or value.utcoffset() is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
+
+
+_FEATURE_VALUE_KEY = "__quant_raas_feature_value_v1__"
+
+
+class FeatureValueJSON(TypeDecorator[Any]):
+    """Preserve JSON scalar types even under SQLite's numeric affinity."""
+
+    impl = JSON
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: object) -> dict[str, Any]:
+        return {_FEATURE_VALUE_KEY: value}
+
+    def process_result_value(self, value: Any, dialect: object) -> Any:
+        if isinstance(value, dict) and set(value) == {_FEATURE_VALUE_KEY}:
+            return value[_FEATURE_VALUE_KEY]
+        return value
 
 
 class Base(DeclarativeBase):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -45,8 +46,9 @@ def _snapshot(
     effective_at: datetime,
     available_at: datetime,
     calculated_at: datetime | None = None,
-    value: float,
+    value: Any,
     code_version: str = "code-v1",
+    metadata: dict[str, Any] | None = None,
 ) -> FeatureSnapshot:
     return FeatureSnapshot(
         feature_snapshot_id=UUID(int=identifier),
@@ -60,6 +62,7 @@ def _snapshot(
         research_run_id=research_run_id,
         code_version=code_version,
         config_version=config_version,
+        metadata=metadata or {},
     )
 
 
@@ -431,6 +434,65 @@ def test_exact_identical_feature_retry_is_idempotent(
 
 
 @pytest.mark.parametrize(
+    ("field", "original", "divergent"),
+    [
+        pytest.param("value", True, 1, id="value-bool-int"),
+        pytest.param("value", 1, 1.0, id="value-int-float"),
+        pytest.param(
+            "metadata",
+            {"nested": {"value": True}},
+            {"nested": {"value": 1}},
+            id="metadata-bool-int",
+        ),
+        pytest.param(
+            "metadata",
+            {"nested": {"value": 1}},
+            {"nested": {"value": 1.0}},
+            id="metadata-int-float",
+        ),
+    ],
+)
+def test_exact_identity_retry_uses_json_type_exact_payload_equality(
+    field: str,
+    original: Any,
+    divergent: Any,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    snapshot = _snapshot(
+        556,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=effective + timedelta(minutes=5),
+        value=original if field == "value" else 7.0,
+        metadata=original if field == "metadata" else None,
+    )
+    retry = snapshot.model_copy(update={field: divergent})
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+
+    assert repository.upsert_many([snapshot]) == 1
+    with pytest.raises(RepositoryConflictError, match="different persisted payload"):
+        repository.upsert_many([retry])
+
+    assert sqlite_session.is_active
+    assert sqlite_session.scalar(select(func.count()).select_from(FeatureSnapshotRecord)) == 1
+    sqlite_session.expire_all()
+    stored = sqlite_session.get(FeatureSnapshotRecord, snapshot.feature_snapshot_id)
+    assert stored is not None
+    stored_json_value = (
+        stored.value if field == "value" else stored.metadata_json["nested"]["value"]
+    )
+    expected_json_value = original if field == "value" else original["nested"]["value"]
+    assert type(stored_json_value) is type(expected_json_value)
+    assert stored_json_value == expected_json_value
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "calculated_at",
@@ -729,6 +791,85 @@ def test_equal_precedence_vintages_with_divergent_content_are_rejected(
         )
         == 2
     )
+    with pytest.raises(RepositoryConflictError, match="ambiguous latest feature vintage"):
+        if method == "latest_as_of":
+            repository.latest_as_of(
+                sample_security.security_id,
+                ["signal"],
+                effective_at=calculated,
+                knowledge_time=calculated,
+            )
+        else:
+            repository.panel_as_of(
+                [sample_security.security_id],
+                {"signal": "v1"},
+                config_version="panel-v1",
+                as_of=calculated,
+            )
+
+
+@pytest.mark.parametrize("method", ["latest_as_of", "panel_as_of"])
+@pytest.mark.parametrize(
+    ("field", "left", "right"),
+    [
+        pytest.param("value", True, 1, id="value-bool-int"),
+        pytest.param("value", 1, 1.0, id="value-int-float"),
+        pytest.param(
+            "metadata",
+            {"nested": {"value": True}},
+            {"nested": {"value": 1}},
+            id="metadata-bool-int",
+        ),
+        pytest.param(
+            "metadata",
+            {"nested": {"value": 1}},
+            {"nested": {"value": 1.0}},
+            id="metadata-int-float",
+        ),
+    ],
+)
+def test_equal_precedence_vintages_use_json_type_exact_semantic_equality(
+    method: str,
+    field: str,
+    left: Any,
+    right: Any,
+    sqlite_session: Session,
+    sample_security: Security,
+    research_run: ResearchRun,
+) -> None:
+    second_run = research_run.model_copy(
+        update={"research_run_id": UUID(int=612), "run_key": "daily:json-type-divergent"}
+    )
+    SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_run(second_run)
+    effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
+    available = effective + timedelta(minutes=5)
+    calculated = available + timedelta(minutes=1)
+    repository = SqlAlchemyFeatureRepository(sqlite_session)
+    first = _snapshot(
+        611,
+        security_id=sample_security.security_id,
+        research_run_id=research_run.research_run_id,
+        effective_at=effective,
+        available_at=available,
+        calculated_at=calculated,
+        value=left if field == "value" else 7.0,
+        metadata=left if field == "metadata" else None,
+    )
+    second = _snapshot(
+        612,
+        security_id=sample_security.security_id,
+        research_run_id=second_run.research_run_id,
+        effective_at=effective,
+        available_at=available,
+        calculated_at=calculated,
+        value=right if field == "value" else 7.0,
+        metadata=right if field == "metadata" else None,
+    )
+
+    assert repository.upsert_many([first, second]) == 2
     with pytest.raises(RepositoryConflictError, match="ambiguous latest feature vintage"):
         if method == "latest_as_of":
             repository.latest_as_of(
