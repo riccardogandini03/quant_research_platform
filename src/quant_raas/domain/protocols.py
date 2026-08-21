@@ -29,6 +29,9 @@ from quant_raas.domain.research import (
     ResearchCard,
     ResearchFinding,
     ResearchRun,
+    Thesis,
+    ThesisVersion,
+    ThesisVersionSelection,
 )
 from quant_raas.domain.security import (
     BenchmarkMapping,
@@ -149,6 +152,47 @@ class FeatureRepository(Protocol):
         effective_at: datetime,
         knowledge_time: datetime,
     ) -> Sequence[FeatureSnapshot]: ...
+
+
+@runtime_checkable
+class ThesisRepository(Protocol):
+    def add_thesis(self, thesis: Thesis) -> Thesis: ...
+
+    def get_by_id(self, thesis_id: UUID) -> Thesis | None: ...
+
+    def get_by_key(self, thesis_key: str) -> Thesis | None: ...
+
+    def list_for_security(
+        self,
+        security_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> Sequence[Thesis]: ...
+
+    def add_version(
+        self,
+        version: ThesisVersion,
+        *,
+        expected_version: int,
+    ) -> ThesisVersion: ...
+
+    def list_versions(self, thesis_id: UUID) -> Sequence[ThesisVersion]: ...
+
+    def version_as_of(
+        self,
+        thesis: Thesis,
+        *,
+        effective_at: datetime,
+        knowledge_time: datetime,
+    ) -> ThesisVersionSelection: ...
+
+    def archive(
+        self,
+        thesis_id: UUID,
+        *,
+        archived_at: datetime,
+        archived_by: str,
+    ) -> Thesis: ...
 
 
 @runtime_checkable

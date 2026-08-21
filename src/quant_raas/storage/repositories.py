@@ -11,7 +11,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, insert, or_, select
+from sqlalchemy import Select, and_, func, insert, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from quant_raas.common.clock import ensure_utc
@@ -21,7 +22,7 @@ from quant_raas.common.errors import (
     IdentifierNotFoundError,
     RepositoryConflictError,
 )
-from quant_raas.domain.enums import BenchmarkKind, SecurityStatus
+from quant_raas.domain.enums import BenchmarkKind, SecurityStatus, ThesisStatus
 from quant_raas.domain.events import CompanyEvent
 from quant_raas.domain.market import CorporateAction, FeatureSnapshot, IngestionBatch, PriceBar
 from quant_raas.domain.portfolio import (
@@ -36,6 +37,10 @@ from quant_raas.domain.research import (
     ResearchCard,
     ResearchFinding,
     ResearchRun,
+    Thesis,
+    ThesisContent,
+    ThesisVersion,
+    ThesisVersionSelection,
 )
 from quant_raas.domain.security import (
     BenchmarkMapping,
@@ -43,6 +48,7 @@ from quant_raas.domain.security import (
     SecurityIdentifier,
     SecurityReference,
 )
+from quant_raas.research.thesis import select_thesis_version
 from quant_raas.storage.models import (
     BenchmarkMappingRecord,
     CompanyEventRecord,
@@ -61,6 +67,8 @@ from quant_raas.storage.models import (
     ResearchRunRecord,
     SecurityIdentifierRecord,
     SecurityRecord,
+    ThesisRecord,
+    ThesisVersionRecord,
     research_card_evidence,
     research_card_finding,
     research_finding_evidence,
@@ -127,6 +135,48 @@ def _mapping_from_record(record: BenchmarkMappingRecord) -> BenchmarkMapping:
             "config_version": record.config_version,
             "created_at": record.created_at,
         }
+    )
+
+
+def _thesis_from_record(record: ThesisRecord) -> Thesis:
+    return Thesis.model_validate(
+        {
+            "thesis_id": record.thesis_id,
+            "thesis_key": record.thesis_key,
+            "security_id": record.security_id,
+            "title": record.title,
+            "status": record.status,
+            "created_by": record.created_by,
+            "created_at": record.created_at,
+            "archived_at": record.archived_at,
+            "archived_by": record.archived_by,
+        }
+    )
+
+
+def _thesis_version_from_record(record: ThesisVersionRecord) -> ThesisVersion:
+    return ThesisVersion.model_validate(
+        {
+            "thesis_version_id": record.thesis_version_id,
+            "thesis_id": record.thesis_id,
+            "version": record.version,
+            "valid_from": record.valid_from,
+            "valid_to": record.valid_to,
+            "content": ThesisContent.model_validate(record.nodes),
+            "authored_by": record.authored_by,
+            "approved_by": record.approved_by,
+            "approved_at": record.approved_at,
+            "created_at": record.created_at,
+        }
+    )
+
+
+def _locked_thesis_statement(thesis_id: UUID) -> Select[tuple[ThesisRecord]]:
+    return (
+        select(ThesisRecord)
+        .where(ThesisRecord.thesis_id == thesis_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -927,6 +977,182 @@ def _feature_from_record(row: FeatureSnapshotRecord) -> FeatureSnapshot:
             "metadata": row.metadata_json,
         }
     )
+
+
+class SqlAlchemyThesisRepository:
+    """Append-only thesis persistence with caller-owned transactions."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add_thesis(self, thesis: Thesis) -> Thesis:
+        existing = self.session.scalar(
+            select(ThesisRecord).where(ThesisRecord.thesis_key == thesis.thesis_key)
+        )
+        if existing is not None:
+            raise RepositoryConflictError(f"thesis key {thesis.thesis_key!r} already exists")
+        record = ThesisRecord(
+            thesis_id=thesis.thesis_id,
+            thesis_key=thesis.thesis_key,
+            security_id=thesis.security_id,
+            title=thesis.title,
+            status=thesis.status.value,
+            created_by=thesis.created_by,
+            created_at=thesis.created_at,
+            archived_at=thesis.archived_at,
+            archived_by=thesis.archived_by,
+        )
+        self.session.add(record)
+        try:
+            self.session.flush((record,))
+        except IntegrityError as error:
+            raise RepositoryConflictError(
+                f"thesis key {thesis.thesis_key!r} already exists"
+            ) from error
+        return _thesis_from_record(record)
+
+    def get_by_id(self, thesis_id: UUID) -> Thesis | None:
+        record = self.session.get(ThesisRecord, thesis_id)
+        return _thesis_from_record(record) if record is not None else None
+
+    def get_by_key(self, thesis_key: str) -> Thesis | None:
+        record = self.session.scalar(
+            select(ThesisRecord).where(ThesisRecord.thesis_key == thesis_key)
+        )
+        return _thesis_from_record(record) if record is not None else None
+
+    def list_for_security(
+        self,
+        security_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> Sequence[Thesis]:
+        statement = select(ThesisRecord).where(ThesisRecord.security_id == security_id)
+        if not include_archived:
+            statement = statement.where(ThesisRecord.status == ThesisStatus.ACTIVE.value)
+        statement = statement.order_by(ThesisRecord.thesis_key, ThesisRecord.thesis_id)
+        return tuple(_thesis_from_record(row) for row in self.session.scalars(statement))
+
+    def add_version(
+        self,
+        version: ThesisVersion,
+        *,
+        expected_version: int,
+    ) -> ThesisVersion:
+        thesis = self.session.scalar(_locked_thesis_statement(version.thesis_id))
+        if thesis is None:
+            raise RepositoryConflictError(f"thesis {version.thesis_id} does not exist")
+        if thesis.status == ThesisStatus.ARCHIVED.value:
+            raise RepositoryConflictError("cannot append a version to an archived thesis")
+
+        latest_version = int(
+            self.session.scalar(
+                select(func.coalesce(func.max(ThesisVersionRecord.version), 0)).where(
+                    ThesisVersionRecord.thesis_id == version.thesis_id
+                )
+            )
+            or 0
+        )
+        if latest_version != expected_version:
+            raise RepositoryConflictError(
+                f"expected version {expected_version}, but latest version is {latest_version}"
+            )
+        next_version = expected_version + 1
+        if version.version != next_version:
+            raise RepositoryConflictError(f"next thesis version must be {next_version}")
+
+        latest = self.session.scalar(
+            select(ThesisVersionRecord)
+            .where(ThesisVersionRecord.thesis_id == version.thesis_id)
+            .order_by(
+                ThesisVersionRecord.version.desc(),
+                ThesisVersionRecord.approved_at.desc(),
+                ThesisVersionRecord.thesis_version_id.desc(),
+            )
+        )
+        if latest is not None and version.valid_from < latest.valid_from:
+            raise RepositoryConflictError(
+                "new thesis version valid_from cannot precede the latest activation"
+            )
+
+        record = ThesisVersionRecord(
+            thesis_version_id=version.thesis_version_id,
+            thesis_id=version.thesis_id,
+            version=version.version,
+            valid_from=version.valid_from,
+            valid_to=version.valid_to,
+            nodes=version.content.model_dump(mode="json"),
+            authored_by=version.authored_by,
+            approved_by=version.approved_by,
+            approved_at=version.approved_at,
+            created_at=version.created_at,
+        )
+        self.session.add(record)
+        try:
+            self.session.flush((record,))
+        except IntegrityError as error:
+            raise RepositoryConflictError(
+                f"thesis {version.thesis_id} version {version.version} already exists"
+            ) from error
+        return _thesis_version_from_record(record)
+
+    def list_versions(self, thesis_id: UUID) -> Sequence[ThesisVersion]:
+        statement = (
+            select(ThesisVersionRecord)
+            .where(ThesisVersionRecord.thesis_id == thesis_id)
+            .order_by(
+                ThesisVersionRecord.version,
+                ThesisVersionRecord.approved_at,
+                ThesisVersionRecord.thesis_version_id,
+            )
+        )
+        return tuple(_thesis_version_from_record(row) for row in self.session.scalars(statement))
+
+    def version_as_of(
+        self,
+        thesis: Thesis,
+        *,
+        effective_at: datetime,
+        knowledge_time: datetime,
+    ) -> ThesisVersionSelection:
+        return select_thesis_version(
+            thesis,
+            self.list_versions(thesis.thesis_id),
+            effective_at=effective_at,
+            knowledge_time=knowledge_time,
+        )
+
+    def archive(
+        self,
+        thesis_id: UUID,
+        *,
+        archived_at: datetime,
+        archived_by: str,
+    ) -> Thesis:
+        record = self.session.scalar(_locked_thesis_statement(thesis_id))
+        if record is None:
+            raise RepositoryConflictError(f"thesis {thesis_id} does not exist")
+        if record.status == ThesisStatus.ARCHIVED.value:
+            return _thesis_from_record(record)
+
+        archived = Thesis.model_validate(
+            {
+                "thesis_id": record.thesis_id,
+                "thesis_key": record.thesis_key,
+                "security_id": record.security_id,
+                "title": record.title,
+                "status": ThesisStatus.ARCHIVED,
+                "created_by": record.created_by,
+                "created_at": record.created_at,
+                "archived_at": ensure_utc(archived_at),
+                "archived_by": archived_by,
+            }
+        )
+        record.status = archived.status.value
+        record.archived_at = archived.archived_at
+        record.archived_by = archived.archived_by
+        self.session.flush((record,))
+        return _thesis_from_record(record)
 
 
 class SqlAlchemyResearchRepository:
