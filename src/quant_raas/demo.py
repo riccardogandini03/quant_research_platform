@@ -20,7 +20,7 @@ from quant_raas.domain.market import PriceBarRequest, PriceRequestItem
 from quant_raas.domain.research import ThesisContent
 from quant_raas.domain.security import Security, SecurityIdentifier
 from quant_raas.ingestion.prices import PriceIngestionService, PriceIngestionSummary
-from quant_raas.runtime import materiality_scorer, repositories_for
+from quant_raas.runtime import materiality_scorer, repositories_for, thesis_relevance_evaluator
 from quant_raas.security_master.importer import parse_coverage_csv, parse_holdings_csv
 from quant_raas.security_master.service import SecurityMasterService
 from quant_raas.services.daily_research import (
@@ -288,8 +288,10 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
             portfolios=repos.portfolios,
             market_data=repos.market_data,
             features=repos.features,
+            theses=repos.theses,
             research=repos.research,
             materiality=materiality_scorer(settings),
+            thesis_relevance=thesis_relevance_evaluator(settings),
             clock=lambda: current,
         ).run(
             DailyResearchRequest(

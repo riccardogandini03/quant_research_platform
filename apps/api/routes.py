@@ -30,7 +30,7 @@ from quant_raas.common.errors import (
 from quant_raas.config import get_settings
 from quant_raas.domain.research import MaterialityFeedback
 from quant_raas.domain.security import Security, SecurityIdentifier
-from quant_raas.runtime import materiality_scorer, repositories_for
+from quant_raas.runtime import materiality_scorer, repositories_for, thesis_relevance_evaluator
 from quant_raas.security_master.importer import parse_coverage_csv, parse_holdings_csv
 from quant_raas.security_master.service import SecurityMasterService
 from quant_raas.services.daily_research import DailyResearchRequest, DailyResearchService
@@ -355,8 +355,10 @@ def run_daily_research(
         portfolios=repos.portfolios,
         market_data=repos.market_data,
         features=repos.features,
+        theses=repos.theses,
         research=repos.research,
         materiality=materiality_scorer(settings),
+        thesis_relevance=thesis_relevance_evaluator(settings),
     )
     result = service.run(
         DailyResearchRequest(

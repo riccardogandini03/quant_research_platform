@@ -38,8 +38,22 @@ def test_seed_demo_creates_resolvable_version_one_theses_idempotently(tmp_path: 
     retry_now = now + timedelta(seconds=1)
     retry_context_at = retry_now - timedelta(days=7)
 
-    seed_demo(settings, now=now)
+    first = seed_demo(settings, now=now)
     seed_demo(settings, now=retry_now)
+
+    assert len(first.research.findings) == len(first.research.cards) == 4
+    assert sum(finding.thesis_relevance is not None for finding in first.research.findings) == 3
+    cards_by_security = {card.security_id: card for card in first.research.cards}
+    for finding in first.research.findings:
+        card = cards_by_security[finding.security_id]
+        assessment = finding.thesis_relevance
+        if assessment is None:
+            assert "thesis_relevance" not in finding.score.component_scores
+            assert card.thesis_version_id is None
+            continue
+        assert finding.score.component_scores["thesis_relevance"] == pytest.approx(assessment.score)
+        assert card.thesis_version_id == assessment.thesis_version_id
+        assert card.thesis_impact == assessment.impact
 
     engine = create_sql_engine(settings)
     factory = create_session_factory(engine)

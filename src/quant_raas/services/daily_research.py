@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import isfinite
 from uuid import UUID
 
 import pandas as pd
 
 from quant_raas.common.clock import ensure_utc, utc_now
+from quant_raas.common.errors import QuantRaasError
 from quant_raas.domain.enums import BatchStatus, BenchmarkKind
 from quant_raas.domain.market import FeatureSnapshot, PriceBar
 from quant_raas.domain.portfolio import CoverageMember
@@ -21,17 +22,30 @@ from quant_raas.domain.protocols import (
     PortfolioRepository,
     ResearchRepository,
     SecurityRepository,
+    ThesisRepository,
 )
-from quant_raas.domain.research import EvidenceReference, ResearchCard, ResearchFinding, ResearchRun
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchCard,
+    ResearchFinding,
+    ResearchRun,
+    ThesisRelevanceAssessment,
+    ThesisSignal,
+)
 from quant_raas.quant.anomalies import fit_abnormal_return_model, volume_zscore
 from quant_raas.quant.factors import rolling_beta
 from quant_raas.quant.returns import relative_return, rolling_total_return, simple_returns
 from quant_raas.quant.risk import rolling_volatility
 from quant_raas.research.cards import build_research_card
 from quant_raas.research.evidence import price_bar_evidence
-from quant_raas.research.findings import PriceResearchSnapshot, build_price_finding
+from quant_raas.research.findings import (
+    PriceResearchSnapshot,
+    build_price_finding,
+    price_signal_strengths,
+)
 from quant_raas.research.ids import stable_research_id
 from quant_raas.research.materiality import MaterialityScorer
+from quant_raas.research.thesis import ThesisRelevanceEvaluator
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,16 +104,20 @@ class DailyResearchService:
         portfolios: PortfolioRepository,
         market_data: MarketDataRepository,
         features: FeatureRepository,
+        theses: ThesisRepository,
         research: ResearchRepository,
         materiality: MaterialityScorer,
+        thesis_relevance: ThesisRelevanceEvaluator,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.securities = securities
         self.portfolios = portfolios
         self.market_data = market_data
         self.feature_repository = features
+        self.thesis_repository = theses
         self.research_repository = research
         self.materiality = materiality
+        self.thesis_relevance = thesis_relevance
         self.clock = clock
 
     def run(
@@ -133,11 +151,24 @@ class DailyResearchService:
         )
         by_security = _group_bars(bars)
         batch_ids = tuple(sorted({bar.ingestion_batch_id for bar in bars}, key=str))
-        run_key = _run_key(request, batch_ids)
+        thesis_method_version = self.thesis_relevance.config.method_version
+        run_key = _run_key(
+            request,
+            batch_ids,
+            thesis_method_version=thesis_method_version,
+        )
         run_id = stable_research_id("run", run_key)
+        run_config_version = (
+            "bundle:"
+            + hashlib.sha256(
+                f"{request.feature_config_version}|{thesis_method_version}".encode()
+            ).hexdigest()
+        )
         started_at = max(ensure_utc(self.clock()), cutoff)
 
-        calculations: list[tuple[CoverageMember, _SecurityCalculation]] = []
+        calculations: list[
+            tuple[CoverageMember, _SecurityCalculation, ThesisRelevanceAssessment | None]
+        ] = []
         failures: list[SecurityResearchFailure] = []
         weights = dict(position_weights or {})
         for member in members:
@@ -151,20 +182,27 @@ class DailyResearchService:
                     code_version=request.code_version,
                     config_version=request.feature_config_version,
                 )
-                calculations.append((member, calculation))
-            except (ValueError, ArithmeticError) as error:
+                assessment = self._assess_thesis(
+                    member,
+                    calculation,
+                    effective_at=as_of,
+                    knowledge_time=cutoff,
+                )
+                calculations.append((member, calculation, assessment))
+            except (QuantRaasError, ValueError, ArithmeticError) as error:
                 failures.append(SecurityResearchFailure(member.security_id, str(error)))
 
         findings: list[ResearchFinding] = []
         cards: list[ResearchCard] = []
         feature_snapshots: list[FeatureSnapshot] = []
         evidence_by_id: dict[UUID, EvidenceReference] = {}
-        for member, calculation in calculations:
+        for member, calculation, assessment in calculations:
             finding = build_price_finding(
                 calculation.snapshot,
                 research_run_id=run_id,
                 scorer=self.materiality,
                 position_weight=weights.get(member.security_id),
+                thesis_assessment=assessment,
             )
             card = build_research_card(
                 [finding],
@@ -200,7 +238,7 @@ class DailyResearchService:
             completed_at=completed_at,
             status=status,
             code_version=request.code_version,
-            config_version=request.feature_config_version,
+            config_version=run_config_version,
             ingestion_batch_ids=batch_ids,
             error_message=(
                 "; ".join(f"{failure.security_id}: {failure.message}" for failure in failures)[
@@ -248,6 +286,48 @@ class DailyResearchService:
                 ),
             }
         return result
+
+    def _assess_thesis(
+        self,
+        member: CoverageMember,
+        calculation: _SecurityCalculation,
+        *,
+        effective_at: datetime,
+        knowledge_time: datetime,
+    ) -> ThesisRelevanceAssessment | None:
+        if member.thesis_id is None:
+            return None
+        thesis = self.thesis_repository.get_by_key(member.thesis_id)
+        if thesis is None or thesis.security_id != member.security_id:
+            raise ValueError(f"invalid thesis reference {member.thesis_id!r}")
+        selection = self.thesis_repository.version_as_of(
+            thesis,
+            effective_at=effective_at,
+            knowledge_time=knowledge_time,
+        )
+        if selection.version is None:
+            raise ValueError(f"thesis {member.thesis_id!r} is {selection.status.value} at cutoff")
+        strengths = price_signal_strengths(calculation.snapshot)
+        by_name = {feature.feature_name: feature for feature in calculation.features}
+        signals = tuple(
+            ThesisSignal(
+                feature_name=name,
+                raw_value=float(by_name[name].value),
+                normalized_strength=strength,
+                feature_snapshot_id=by_name[name].feature_snapshot_id,
+                unit=by_name[name].unit,
+            )
+            for name, strength in sorted(strengths.items())
+            if name in by_name
+            and isinstance(by_name[name].value, (int, float))
+            and not isinstance(by_name[name].value, bool)
+            and isfinite(float(by_name[name].value))
+        )
+        return self.thesis_relevance.assess(
+            selection.version,
+            signals=signals,
+            features=calculation.features,
+        )
 
     def _calculate_security(
         self,
@@ -421,7 +501,12 @@ class DailyResearchService:
         )
 
 
-def _run_key(request: DailyResearchRequest, batch_ids: tuple[UUID, ...]) -> str:
+def _run_key(
+    request: DailyResearchRequest,
+    batch_ids: tuple[UUID, ...],
+    *,
+    thesis_method_version: str,
+) -> str:
     payload = "|".join(
         [
             str(request.coverage_list_id),
@@ -430,6 +515,7 @@ def _run_key(request: DailyResearchRequest, batch_ids: tuple[UUID, ...]) -> str:
             request.source,
             request.code_version,
             request.feature_config_version,
+            thesis_method_version,
             *(str(value) for value in batch_ids),
         ]
     )
@@ -471,15 +557,13 @@ def _last_finite(values: pd.Series) -> float | None:
     if values.empty:
         return None
     value = values.iloc[-1]
-    return float(value) if pd.notna(value) and math.isfinite(float(value)) else None
+    return float(value) if pd.notna(value) and isfinite(float(value)) else None
 
 
 def _last_at(values: pd.Series, index: object) -> float | None:
     value = values.get(index)
     return (
-        float(value)
-        if value is not None and pd.notna(value) and math.isfinite(float(value))
-        else None
+        float(value) if value is not None and pd.notna(value) and isfinite(float(value)) else None
     )
 
 
