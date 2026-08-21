@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session
 
 from quant_raas.config import Settings
 from quant_raas.research.materiality import MaterialityConfig, MaterialityScorer
+from quant_raas.research.thesis import ThesisRelevanceConfig, ThesisRelevanceEvaluator
 from quant_raas.storage.repositories import (
     SqlAlchemyFeatureRepository,
     SqlAlchemyMarketDataRepository,
     SqlAlchemyPortfolioRepository,
     SqlAlchemyResearchRepository,
     SqlAlchemySecurityRepository,
+    SqlAlchemyThesisRepository,
 )
 
 
@@ -23,6 +25,7 @@ class Repositories:
     portfolios: SqlAlchemyPortfolioRepository
     market_data: SqlAlchemyMarketDataRepository
     features: SqlAlchemyFeatureRepository
+    theses: SqlAlchemyThesisRepository
     research: SqlAlchemyResearchRepository
 
 
@@ -34,6 +37,7 @@ def repositories_for(session: Session) -> Repositories:
         portfolios=SqlAlchemyPortfolioRepository(session),
         market_data=SqlAlchemyMarketDataRepository(session),
         features=SqlAlchemyFeatureRepository(session),
+        theses=SqlAlchemyThesisRepository(session),
         research=SqlAlchemyResearchRepository(session),
     )
 
@@ -41,3 +45,8 @@ def repositories_for(session: Session) -> Repositories:
 def materiality_scorer(settings: Settings) -> MaterialityScorer:
     path = settings.config_directory / "materiality" / "default.yaml"
     return MaterialityScorer(MaterialityConfig.from_yaml(path))
+
+
+def thesis_relevance_evaluator(settings: Settings) -> ThesisRelevanceEvaluator:
+    path = settings.config_directory / "thesis" / "relevance.yaml"
+    return ThesisRelevanceEvaluator(ThesisRelevanceConfig.from_yaml(path))
