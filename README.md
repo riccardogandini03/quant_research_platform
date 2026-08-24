@@ -19,8 +19,18 @@ The Phase 0/1 foundation covers or defines:
 - deterministic price normalization and quantitative calculations;
 - materiality and factor configuration examples;
 - point-in-time rules that prevent later vintages entering earlier snapshots;
+- PM-authored, append-only investment-thesis versions with explicit approval and archival controls;
+- deterministic thesis relevance from exact feature-name matching and threshold-based invalidation proximity, with version and feature lineage;
 - SQLite development and PostgreSQL-compatible persistence foundations; and
 - network-free unit, integration, and point-in-time testing conventions.
+
+Thesis authoring and relevance are deliberately deterministic: they do not map
+unstructured text semantically or generate thesis proposals. Attribution fields
+(`created_by`, `authored_by`, and `approved_by`) record caller-supplied names and
+are not authenticated identities. Missing theses never block research; an
+explicit zero-overlap assessment is instead a valid observed input. The 0.15
+thesis-relevance component raises the current price-only theoretical materiality
+ceiling from 0.45 to 0.60, still below the 0.65 `material` threshold.
 
 Estimate histories, licensed Bloomberg/LSEG feeds, filing/news synthesis, and
 production deployment remain dependent on implementation, entitlements, and

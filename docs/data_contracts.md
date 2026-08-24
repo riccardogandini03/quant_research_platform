@@ -79,7 +79,7 @@ not immutable security identity.
 |---|---|---|
 | `identifier` | yes | Resolves uniquely at the snapshot as-of time. |
 | `weight` | yes | Finite decimal with `abs(weight) <= 10`; negatives support short books. |
-| `thesis_id` | no | Existing thesis reference or blank. |
+| `thesis_id` | no | Lowercase public `thesis_key` (not the internal UUID), or blank. |
 | `benchmark` | no | Resolvable benchmark alias. |
 
 Holdings may additionally specify `identifier_scheme`, `provider`, and
@@ -91,9 +91,53 @@ Holdings may additionally specify `identifier_scheme`, `provider`, and
 security IDs in one file are rejected. Unknown extra columns are rejected by
 default so spelling errors cannot silently disappear.
 
+When supplied, a `thesis_id` must resolve to an existing, active thesis whose
+security matches the row's resolved security. A blank `thesis_id` is valid and
+never blocks a holdings or coverage import.
+
 An import is atomic after validation: either all unambiguous valid rows persist,
 or no snapshot does. A future explicit partial-import mode must report every
 excluded row.
+
+## Thesis and ThesisVersion
+
+`Thesis` is the stable, security-scoped identity. Its public `thesis_key` is
+lowercase and is the value used in CSVs and `/v1/theses` routes; `thesis_id` is
+the internal UUID. A thesis has a title, status, `created_by`, creation time,
+and, when archived, archive time and attribution. Archive replaces deletion.
+
+`ThesisVersion` is immutable, append-only content. Creating a thesis writes
+version 1; every update appends a later version with optimistic
+`expected_version` concurrency rather than overwriting prior content. The
+version content schema is strict (`schema_version: 1`) and consists of:
+
+- `summary`;
+- `drivers`, each with a unique `node_id`, statement, direction, and optional
+  `supporting_features`;
+- `risks`, each with a unique `node_id`, statement, severity, and optional
+  `watch_features`; and
+- `invalidation_rules`, each with a unique `node_id`, statement, exact
+  `feature_name`, comparator, finite warning/breach thresholds, and optional
+  unit.
+
+Feature names are normalized canonical identifiers and matched by exact name:
+there is no semantic or AI-based mapping. Driver/risk relevance is the strongest
+matched finite signal strength; invalidation relevance is the bounded proximity
+between its warning and breach thresholds. Each assessment stores the selected
+thesis/version, matched feature names and feature-snapshot IDs, contribution
+details, and deterministic method version for lineage.
+
+`created_by`, `authored_by`, and `approved_by` are required caller-supplied
+attribution only; they are not authenticated identities until authentication is
+implemented. A version is selected historically only when its thesis and
+approval are known by `knowledge_time` and its `valid_from`/`valid_to` interval
+contains `effective_at`. This prevents later approvals or activations from
+leaking into historical research.
+
+No selected thesis remains a valid research outcome. By contrast, an explicitly
+evaluated thesis with zero feature overlap is an observed zero relevance score:
+it contributes the 0.15 `thesis_relevance` completeness weight even though its
+materiality contribution is zero.
 
 ## PriceBar
 
