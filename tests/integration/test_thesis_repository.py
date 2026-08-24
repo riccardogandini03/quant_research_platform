@@ -536,6 +536,7 @@ def test_thesis_version_delete_is_restricted_by_persisted_research_lineage(
                 node_kind="risk",
                 score=0.75,
                 matched_feature_names=("dollar_volume_zscore_20d",),
+                feature_snapshot_ids=(UUID("82828282-8282-4828-8828-828282828282"),),
             ),
         ),
         method_version="thesis-relevance-v1",

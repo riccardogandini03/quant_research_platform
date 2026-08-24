@@ -31,6 +31,8 @@ from quant_raas.domain.research import (
 THESIS_ID = UUID("71717171-7171-4717-8717-717171717171")
 VERSION_ID = UUID("72727272-7272-4727-8727-727272727272")
 SECURITY_ID = UUID("11111111-1111-4111-8111-111111111111")
+RELATIVE_FEATURE_ID = UUID("81818181-8181-4818-8818-818181818181")
+VOLUME_FEATURE_ID = UUID("82828282-8282-4828-8828-828282828282")
 NOW = datetime(2024, 1, 10, 22, 0, tzinfo=UTC)
 
 
@@ -207,6 +209,7 @@ def test_assessment_and_selection_require_consistent_lineage() -> None:
         node_kind="driver",
         score=0.5,
         matched_feature_names=("relative_return_sector_63d",),
+        feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
     )
     assessment = ThesisRelevanceAssessment(
         thesis_id=THESIS_ID,
@@ -236,23 +239,40 @@ def test_contribution_assessment_and_selection_validate_lineage() -> None:
             matched_feature_names=("relative_return_sector_63d",),
             feature_snapshot_ids=(VERSION_ID, THESIS_ID),
         )
+    with pytest.raises(ValidationError, match="aligned"):
+        ThesisNodeContribution(
+            node_id="relative_strength",
+            node_kind="driver",
+            score=0.5,
+            matched_feature_names=("relative_return_sector_63d",),
+        )
+    with pytest.raises(ValidationError, match="aligned"):
+        ThesisNodeContribution(
+            node_id="relative_strength",
+            node_kind="driver",
+            score=0.5,
+            feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
+        )
     with pytest.raises(ValidationError, match="unevaluated_reason"):
         ThesisNodeContribution(
             node_id="relative_strength",
             node_kind="driver",
             matched_feature_names=("relative_return_sector_63d",),
+            feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
         )
     low = ThesisNodeContribution(
         node_id="alpha",
         node_kind="driver",
         score=0.5,
         matched_feature_names=("relative_return_sector_63d",),
+        feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
     )
     high = ThesisNodeContribution(
         node_id="beta",
         node_kind="risk",
         score=0.8,
         matched_feature_names=("dollar_volume_zscore_20d",),
+        feature_snapshot_ids=(VOLUME_FEATURE_ID,),
     )
     with pytest.raises(ValidationError, match="maximum evaluable contribution"):
         ThesisRelevanceAssessment(

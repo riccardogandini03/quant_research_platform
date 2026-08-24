@@ -28,6 +28,8 @@ from quant_raas.research.materiality import MaterialityConfig, MaterialityScorer
 THESIS_ID = UUID("71717171-7171-4717-8717-717171717171")
 THESIS_VERSION_ID = UUID("72727272-7272-4727-8727-727272727272")
 OTHER_THESIS_VERSION_ID = UUID("73737373-7373-4737-8737-737373737373")
+RELATIVE_FEATURE_ID = UUID("81818181-8181-4818-8818-818181818181")
+VOLUME_FEATURE_ID = UUID("82828282-8282-4828-8828-828282828282")
 
 
 def test_materiality_weights_reproduce_constant_component_score(
@@ -100,6 +102,7 @@ def _assessment(
                 node_kind="driver",
                 score=score,
                 matched_feature_names=("relative_return_sector_63d",),
+                feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
             ),
         )
     return ThesisRelevanceAssessment(
@@ -164,18 +167,21 @@ def test_finding_scores_exact_assessment_and_card_derives_complete_lineage(
                 node_kind="driver",
                 score=0.75,
                 matched_feature_names=("relative_return_sector_63d",),
+                feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
             ),
             ThesisNodeContribution(
                 node_id="relative_break",
                 node_kind="invalidation_rule",
                 score=0.0,
                 matched_feature_names=("relative_return_sector_63d",),
+                feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
             ),
             ThesisNodeContribution(
                 node_id="volume_risk",
                 node_kind="risk",
                 score=0.5,
                 matched_feature_names=("dollar_volume_zscore_20d",),
+                feature_snapshot_ids=(VOLUME_FEATURE_ID,),
             ),
         )
     )
@@ -293,6 +299,7 @@ def test_card_fails_closed_on_mixed_versions_and_breaks_primary_ties_by_node_id(
                 node_kind="driver",
                 score=0.75,
                 matched_feature_names=("relative_return_sector_63d",),
+                feature_snapshot_ids=(RELATIVE_FEATURE_ID,),
             ),
         ),
     )
@@ -304,6 +311,7 @@ def test_card_fails_closed_on_mixed_versions_and_breaks_primary_ties_by_node_id(
                 node_kind="risk",
                 score=0.75,
                 matched_feature_names=("dollar_volume_zscore_20d",),
+                feature_snapshot_ids=(VOLUME_FEATURE_ID,),
             ),
         ),
     )

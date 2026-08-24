@@ -153,15 +153,21 @@ class DailyResearchService:
         by_security = _group_bars(bars)
         batch_ids = tuple(sorted({bar.ingestion_batch_id for bar in bars}, key=str))
         thesis_method_version = self.thesis_relevance.config.method_version
+        materiality_score_version = self.materiality.config.score_version
+        weights = dict(position_weights or {})
         run_key = _run_key(
             request,
             batch_ids,
             thesis_method_version=thesis_method_version,
+            materiality_score_version=materiality_score_version,
+            position_weights=position_weights,
+            covered_security_ids=tuple(member.security_id for member in members),
         )
         run_id = stable_research_id("run", run_key)
         run_config_version = _run_config_version(
             request.feature_config_version,
             thesis_method_version,
+            materiality_score_version,
         )
         existing_run = self.research_repository.run_by_key(run_key)
         if existing_run is None:
@@ -183,7 +189,6 @@ class DailyResearchService:
             tuple[CoverageMember, _SecurityCalculation, ThesisRelevanceAssessment | None]
         ] = []
         failures: list[SecurityResearchFailure] = []
-        weights = dict(position_weights or {})
         for member in members:
             try:
                 calculation = self._calculate_security(
@@ -551,25 +556,56 @@ def _run_key(
     batch_ids: tuple[UUID, ...],
     *,
     thesis_method_version: str,
+    materiality_score_version: str,
+    position_weights: Mapping[UUID, float] | None,
+    covered_security_ids: Sequence[UUID],
 ) -> str:
+    effective_position_weights = _canonical_position_weights(
+        position_weights,
+        covered_security_ids,
+    )
     payload = _canonical_json(
         [
             str(request.coverage_list_id),
             ensure_utc(request.as_of).isoformat(),
             ensure_utc(request.data_cutoff_at).isoformat(),
+            request.lookback_calendar_days,
             request.source,
             request.code_version,
             request.feature_config_version,
             thesis_method_version,
+            materiality_score_version,
+            effective_position_weights,
             [str(value) for value in batch_ids],
         ]
     )
     return f"daily:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
-def _run_config_version(feature_config_version: str, thesis_method_version: str) -> str:
-    payload = _canonical_json([feature_config_version, thesis_method_version])
+def _run_config_version(
+    feature_config_version: str,
+    thesis_method_version: str,
+    materiality_score_version: str,
+) -> str:
+    payload = _canonical_json(
+        [feature_config_version, thesis_method_version, materiality_score_version]
+    )
     return f"bundle:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_position_weights(
+    position_weights: Mapping[UUID, float] | None,
+    covered_security_ids: Sequence[UUID],
+) -> dict[str, float]:
+    if position_weights is None:
+        return {}
+    return {
+        str(security_id): (
+            0.0 if position_weights[security_id] == 0.0 else float(position_weights[security_id])
+        )
+        for security_id in sorted(set(covered_security_ids), key=str)
+        if security_id in position_weights
+    }
 
 
 def _canonical_json(value: object) -> str:

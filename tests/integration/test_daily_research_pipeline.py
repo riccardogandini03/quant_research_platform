@@ -60,6 +60,7 @@ class _PipelineHarness:
         self,
         *,
         evaluator: ThesisRelevanceEvaluator | None = None,
+        materiality: MaterialityScorer | None = None,
         clock_at: datetime | None = None,
     ) -> DailyResearchService:
         return DailyResearchService(
@@ -69,7 +70,7 @@ class _PipelineHarness:
             features=self.features,
             theses=self.theses,
             research=self.research,
-            materiality=self.materiality,
+            materiality=materiality or self.materiality,
             thesis_relevance=evaluator or self.thesis_relevance,
             clock=lambda: clock_at or self.fixed_now,
         )
@@ -216,12 +217,13 @@ def _request(
     *,
     cutoff: datetime,
     feature_config_version: str = "equity-mvp-test-v1",
+    lookback_calendar_days: int = 370,
 ) -> DailyResearchRequest:
     return DailyResearchRequest(
         coverage_list_id=coverage.coverage_list_id,
         as_of=AS_OF,
         data_cutoff_at=cutoff,
-        lookback_calendar_days=370,
+        lookback_calendar_days=lookback_calendar_days,
         source="fixture",
         code_version="integration-test-v1",
         feature_config_version=feature_config_version,
@@ -724,3 +726,56 @@ def test_thesis_method_version_changes_immutable_run_lineage(
         assert {row.feature_snapshot_id: row.research_run_id for row in stored} == dict.fromkeys(
             referenced_ids, result.run.research_run_id
         )
+
+
+def test_each_material_run_input_changes_finding_and_card_identity(
+    sqlite_session: Session,
+    sample_security: Security,
+    fixed_now: datetime,
+    materiality_scorer: MaterialityScorer,
+    thesis_relevance_evaluator: ThesisRelevanceEvaluator,
+) -> None:
+    harness = _pipeline_harness(
+        sqlite_session,
+        fixed_now=fixed_now,
+        materiality=materiality_scorer,
+        thesis_relevance=thesis_relevance_evaluator,
+    )
+    harness.securities.add_security(sample_security)
+    coverage = _add_coverage(
+        harness,
+        name="Complete run-identity coverage",
+        members=((sample_security, None),),
+    )
+    _ingest_prices(harness, (sample_security,))
+    request = _request(coverage, cutoff=fixed_now)
+    weights = {sample_security.security_id: 0.04}
+    baseline = harness.service().run(request, position_weights=weights)
+    changed_evaluator = ThesisRelevanceEvaluator(
+        thesis_relevance_evaluator.config.model_copy(update={"method_version": "thesis-v2"})
+    )
+    changed_materiality = MaterialityScorer(
+        materiality_scorer.config.model_copy(update={"score_version": "materiality-v2"})
+    )
+
+    changed_results = (
+        harness.service().run(
+            _request(coverage, cutoff=fixed_now, lookback_calendar_days=371),
+            position_weights=weights,
+        ),
+        harness.service().run(
+            _request(coverage, cutoff=fixed_now, feature_config_version="feature-v2"),
+            position_weights=weights,
+        ),
+        harness.service(evaluator=changed_evaluator).run(request, position_weights=weights),
+        harness.service(materiality=changed_materiality).run(request, position_weights=weights),
+        harness.service().run(
+            request,
+            position_weights={sample_security.security_id: 0.05},
+        ),
+    )
+
+    for changed in changed_results:
+        assert changed.run.research_run_id != baseline.run.research_run_id
+        assert changed.findings[0].finding_id != baseline.findings[0].finding_id
+        assert changed.cards[0].card_id != baseline.cards[0].card_id

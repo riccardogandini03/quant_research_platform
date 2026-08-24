@@ -420,9 +420,7 @@ class ThesisNodeContribution(DomainModel):
 
     @model_validator(mode="after")
     def validate_contribution_lineage(self) -> ThesisNodeContribution:
-        if self.feature_snapshot_ids and len(self.matched_feature_names) != len(
-            self.feature_snapshot_ids
-        ):
+        if len(self.matched_feature_names) != len(self.feature_snapshot_ids):
             raise ValueError("matched feature names and feature snapshot ids must be aligned")
         if self.score is None and self.unevaluated_reason is None:
             raise ValueError("unevaluated contributions require unevaluated_reason")

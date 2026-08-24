@@ -33,6 +33,27 @@ _INVALIDATION_COLUMNS = (
     "breach_threshold",
     "unit",
 )
+_EMPTY_DRIVER_ROW: Mapping[str, object] = {
+    "node_id": "",
+    "statement": "",
+    "supporting_features": "",
+    "direction": ThesisDirection.POSITIVE.value,
+}
+_EMPTY_RISK_ROW: Mapping[str, object] = {
+    "node_id": "",
+    "statement": "",
+    "watch_features": "",
+    "severity": ThesisRiskSeverity.MEDIUM.value,
+}
+_EMPTY_INVALIDATION_ROW: Mapping[str, object] = {
+    "node_id": "",
+    "statement": "",
+    "feature_name": "",
+    "comparator": InvalidationComparator.GREATER_THAN_OR_EQUAL.value,
+    "warning_threshold": 0.0,
+    "breach_threshold": 0.0,
+    "unit": "",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +69,10 @@ def _features(value: object) -> tuple[str, ...]:
     return tuple(part.strip().lower() for part in str(value).split(",") if part.strip())
 
 
+def _is_untouched_row(row: Mapping[str, object], template: Mapping[str, object]) -> bool:
+    return dict(row) == dict(template)
+
+
 def content_from_editor_rows(
     *,
     summary: str,
@@ -61,36 +86,36 @@ def content_from_editor_rows(
         summary=summary,
         drivers=tuple(
             ThesisDriver(
-                node_id=str(row["node_id"]),
-                statement=str(row["statement"]),
+                node_id=str(row.get("node_id", "")),
+                statement=str(row.get("statement", "")),
                 supporting_features=_features(row.get("supporting_features")),
-                direction=ThesisDirection(str(row["direction"])),
+                direction=ThesisDirection(str(row.get("direction", ""))),
             )
             for row in driver_rows
-            if str(row.get("node_id", "")).strip()
+            if not _is_untouched_row(row, _EMPTY_DRIVER_ROW)
         ),
         risks=tuple(
             ThesisRisk(
-                node_id=str(row["node_id"]),
-                statement=str(row["statement"]),
+                node_id=str(row.get("node_id", "")),
+                statement=str(row.get("statement", "")),
                 watch_features=_features(row.get("watch_features")),
-                severity=ThesisRiskSeverity(str(row["severity"])),
+                severity=ThesisRiskSeverity(str(row.get("severity", ""))),
             )
             for row in risk_rows
-            if str(row.get("node_id", "")).strip()
+            if not _is_untouched_row(row, _EMPTY_RISK_ROW)
         ),
         invalidation_rules=tuple(
             ThesisInvalidationRule(
-                node_id=str(row["node_id"]),
-                statement=str(row["statement"]),
-                feature_name=str(row["feature_name"]),
-                comparator=InvalidationComparator(str(row["comparator"])),
-                warning_threshold=float(row["warning_threshold"]),
-                breach_threshold=float(row["breach_threshold"]),
+                node_id=str(row.get("node_id", "")),
+                statement=str(row.get("statement", "")),
+                feature_name=str(row.get("feature_name", "")),
+                comparator=InvalidationComparator(str(row.get("comparator", ""))),
+                warning_threshold=float(row.get("warning_threshold", "")),
+                breach_threshold=float(row.get("breach_threshold", "")),
                 unit=str(row["unit"]) if row.get("unit") else None,
             )
             for row in invalidation_rows
-            if str(row.get("node_id", "")).strip()
+            if not _is_untouched_row(row, _EMPTY_INVALIDATION_ROW)
         ),
     )
 
@@ -144,8 +169,8 @@ def parse_utc_timestamp(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _empty_rows(columns: Sequence[str]) -> list[dict[str, object]]:
-    return [{column: "" for column in columns}]
+def _empty_rows(template: Mapping[str, object]) -> list[dict[str, object]]:
+    return [dict(template)]
 
 
 def _records(editor_value: Any) -> list[dict[str, object]]:
@@ -158,6 +183,64 @@ def _records(editor_value: Any) -> list[dict[str, object]]:
 
 def _version_label(version: ThesisVersion) -> str:
     return f"v{version.version} · effective {version.valid_from.isoformat()}"
+
+
+def _node_rows(content: ThesisContent) -> list[dict[str, object]]:
+    return (
+        [
+            {
+                "kind": "driver",
+                "node_id": node.node_id,
+                "statement": node.statement,
+                "supporting_features": ", ".join(node.supporting_features),
+                "direction": node.direction.value,
+            }
+            for node in content.drivers
+        ]
+        + [
+            {
+                "kind": "risk",
+                "node_id": node.node_id,
+                "statement": node.statement,
+                "watch_features": ", ".join(node.watch_features),
+                "severity": node.severity.value,
+            }
+            for node in content.risks
+        ]
+        + [
+            {
+                "kind": "invalidation",
+                "node_id": node.node_id,
+                "statement": node.statement,
+                "feature_name": node.feature_name,
+                "comparator": node.comparator.value,
+                "warning_threshold": node.warning_threshold,
+                "breach_threshold": node.breach_threshold,
+                "unit": node.unit,
+                "invalidation_state": "not evaluated",
+            }
+            for node in content.invalidation_rules
+        ]
+    )
+
+
+def _version_history_rows(history: Sequence[ThesisVersion]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for version in history:
+        version_fields: dict[str, object] = {
+            "version": version.version,
+            "valid_from": version.valid_from,
+            "approved_at": version.approved_at,
+            "authored_by": version.authored_by,
+            "approved_by": version.approved_by,
+            "summary": version.content.summary,
+        }
+        nodes = _node_rows(version.content)
+        if nodes:
+            rows.extend({**version_fields, **node} for node in nodes)
+        else:
+            rows.append({**version_fields, "kind": "none"})
+    return rows
 
 
 def _render_history(thesis, history: tuple[ThesisVersion, ...]) -> ThesisVersion:
@@ -181,32 +264,13 @@ def _render_history(thesis, history: tuple[ThesisVersion, ...]) -> ThesisVersion
         f"{selected_version.approved_by} at {selected_version.approved_at.isoformat()}; "
         f"effective from {selected_version.valid_from.isoformat()}"
     )
-    node_rows = (
-        [
-            {"kind": "driver", "node_id": node.node_id, "statement": node.statement}
-            for node in selected_version.content.drivers
-        ]
-        + [
-            {"kind": "risk", "node_id": node.node_id, "statement": node.statement}
-            for node in selected_version.content.risks
-        ]
-        + [
-            {"kind": "invalidation", "node_id": node.node_id, "statement": node.statement}
-            for node in selected_version.content.invalidation_rules
-        ]
-    )
-    st.dataframe(node_rows, use_container_width=True, hide_index=True)
     st.dataframe(
-        [
-            {
-                "version": version.version,
-                "valid_from": version.valid_from,
-                "approved_at": version.approved_at,
-                "authored_by": version.authored_by,
-                "approved_by": version.approved_by,
-            }
-            for version in history
-        ],
+        _node_rows(selected_version.content),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.dataframe(
+        _version_history_rows(history),
         use_container_width=True,
         hide_index=True,
     )
@@ -228,21 +292,21 @@ def _render_editor(
     )
     st.caption("Feature names are comma-separated canonical identifiers.")
     drivers = st.data_editor(
-        rows.drivers or _empty_rows(_DRIVER_COLUMNS),
+        rows.drivers or _empty_rows(_EMPTY_DRIVER_ROW),
         column_order=_DRIVER_COLUMNS,
         num_rows="dynamic",
         key=f"{key_prefix}-drivers",
         use_container_width=True,
     )
     risks = st.data_editor(
-        rows.risks or _empty_rows(_RISK_COLUMNS),
+        rows.risks or _empty_rows(_EMPTY_RISK_ROW),
         column_order=_RISK_COLUMNS,
         num_rows="dynamic",
         key=f"{key_prefix}-risks",
         use_container_width=True,
     )
     invalidations = st.data_editor(
-        rows.invalidation_rules or _empty_rows(_INVALIDATION_COLUMNS),
+        rows.invalidation_rules or _empty_rows(_EMPTY_INVALIDATION_ROW),
         column_order=_INVALIDATION_COLUMNS,
         num_rows="dynamic",
         key=f"{key_prefix}-invalidations",

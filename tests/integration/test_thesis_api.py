@@ -370,3 +370,84 @@ def test_list_requires_security_id(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert "security_id" in str(response.json()["detail"])
+
+
+@pytest.mark.parametrize("field", ["title", "created_by", "authored_by", "approved_by"])
+def test_create_rejects_whitespace_only_direct_strings(
+    client: TestClient,
+    field: str,
+) -> None:
+    payload = _create_payload()
+    payload[field] = "   "
+
+    response = client.post("/v1/theses", json=payload)
+
+    assert response.status_code == 422
+    assert field in str(response.json()["detail"])
+
+
+@pytest.mark.parametrize("field", ["authored_by", "approved_by"])
+def test_append_rejects_whitespace_only_attribution_before_service_entry(
+    client: TestClient,
+    field: str,
+) -> None:
+    payload = _append_payload(expected_version=1)
+    payload[field] = "   "
+
+    response = client.post("/v1/theses/missing_core/versions", json=payload)
+
+    assert response.status_code == 422
+    assert field in str(response.json()["detail"])
+
+
+def test_archive_rejects_whitespace_only_attribution_before_service_entry(
+    client: TestClient,
+) -> None:
+    response = client.request(
+        "DELETE",
+        "/v1/theses/missing_core",
+        json={"archived_by": "   "},
+    )
+
+    assert response.status_code == 422
+    assert "archived_by" in str(response.json()["detail"])
+
+
+def test_direct_request_strings_strip_surrounding_whitespace_consistently(
+    client: TestClient,
+) -> None:
+    create_payload = _create_payload(thesis_key="spaced_core")
+    create_payload.update(
+        {
+            "thesis_key": "  spaced_core  ",
+            "title": "  Spaced title  ",
+            "created_by": "  creator@example.com  ",
+            "authored_by": "  author@example.com  ",
+            "approved_by": "  approver@example.com  ",
+        }
+    )
+
+    created = client.post("/v1/theses", json=create_payload)
+
+    assert created.status_code == 201
+    assert created.json()["thesis"]["thesis_key"] == "spaced_core"
+    assert created.json()["thesis"]["title"] == "Spaced title"
+    assert created.json()["thesis"]["created_by"] == "creator@example.com"
+    assert created.json()["version"]["authored_by"] == "author@example.com"
+    assert created.json()["version"]["approved_by"] == "approver@example.com"
+
+    append_payload = _append_payload(expected_version=1)
+    append_payload["authored_by"] = "  next-author@example.com  "
+    append_payload["approved_by"] = "  next-approver@example.com  "
+    appended = client.post("/v1/theses/spaced_core/versions", json=append_payload)
+    assert appended.status_code == 201
+    assert appended.json()["version"]["authored_by"] == "next-author@example.com"
+    assert appended.json()["version"]["approved_by"] == "next-approver@example.com"
+
+    archived = client.request(
+        "DELETE",
+        "/v1/theses/spaced_core",
+        json={"archived_by": "  archiver@example.com  "},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["thesis"]["archived_by"] == "archiver@example.com"

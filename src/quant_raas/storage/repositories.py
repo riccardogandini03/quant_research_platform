@@ -1340,7 +1340,12 @@ class SqlAlchemyResearchRepository:
             )
         )
         if existing:
-            return _finding_from_record(existing)
+            persisted = _finding_from_record(existing)
+            if persisted != finding:
+                raise RepositoryConflictError(
+                    f"finding key {finding.finding_key!r} contains a different persisted payload"
+                )
+            return persisted
         payload = finding.model_dump(mode="json")
         self.session.add(
             ResearchFindingRecord(
@@ -1381,7 +1386,12 @@ class SqlAlchemyResearchRepository:
             select(ResearchCardRecord).where(ResearchCardRecord.card_key == card.card_key)
         )
         if existing:
-            return _card_from_record(existing)
+            persisted = _card_from_record(existing)
+            if persisted != card:
+                raise RepositoryConflictError(
+                    f"card key {card.card_key!r} contains a different persisted payload"
+                )
+            return persisted
         payload = card.model_dump(mode="json")
         self.session.add(
             ResearchCardRecord(

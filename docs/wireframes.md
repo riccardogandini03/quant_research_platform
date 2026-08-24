@@ -67,8 +67,10 @@ The company page includes a deterministic thesis panel:
 ```text
 Investment thesis: ASML core thesis                         ACTIVE / v4
 Summary: EUV pricing power; China restrictions remain manageable
-Drivers: EUV volumes [eps_revision_fy3]   Risks: export controls [high]
-Invalidation: FY27 EPS revision             warning 10% / breach 15% [not breached]
+Driver: EUV volumes | supporting: eps_revision_fy3 | direction: positive
+Risk: export controls | watch: policy_restriction_index | severity: high
+Invalidation: FY27 EPS revision | eps_revision_fy3 <= warning -10% / breach -15%
+              unit: percent | state: not evaluated
 Version history: [v1] [v2] [v3] [v4]       [Append version] [Approve version]
 Attribution: caller-supplied, unauthenticated              [Archive thesis]
 ```

@@ -32,9 +32,9 @@ This is the product and engineering specification plus the build roadmap. It is 
 | **PLANNED** | Specified here, no code |
 | **BLOCKED** | Cannot proceed until a decision in section 0.4 or an entitlement is resolved |
 
-## 0.3 Implementation status as of 2026-08-19
+## 0.3 Implementation status as of 2026-08-24
 
-The repository contains roughly 13,700 lines of Python across `src/quant_raas`, `apps`, `workflows` and `tests`. The deterministic suite is 275 passing tests with 84% total coverage in the `--cov-branch` report, under `mypy --strict`, Ruff, and an 80% coverage gate. Phase 0 and most of Phase 1 are real.
+The deterministic suite is 275 passing tests with 84% total coverage in the `--cov-branch` report, under `mypy --strict`, Ruff, and an 80% coverage gate. Phase 0 and most of Phase 1 are real.
 
 | Area | Status | Notes |
 |---|---|---|
@@ -62,7 +62,7 @@ The repository contains roughly 13,700 lines of Python across `src/quant_raas`, 
 The engine is genuinely good and the discipline is high — loud failures, no silent fallbacks, real PIT enforcement. Two things are missing, and both are structural rather than incremental:
 
 1. **There is no real data.** Every finding family beyond price/risk is blocked on a vendor connector. The quant functions were written ahead of the data that feeds them.
-2. **There is no product shell.** No tenancy, no auth, no entitlement enforcement — all of which are much cheaper to add now than after 19 tables and 1,100 lines of repositories accumulate more callers.
+2. **There is no product shell.** No tenancy, no auth, no entitlement enforcement — all of which are much cheaper to add now than after the persistence layer accumulates more callers.
 
 ## 0.4 Open decision register
 
@@ -2098,7 +2098,7 @@ Ordered by expected damage. Each risk needs an owner and a review date.
 | R9 | **Quant modules built ahead of data** never get validated against reality | Medium — rework | Already occurring | Pull research-mode connectors forward (revised Phase 2); validate each quant module against real vendor data as it lands |
 | R10 | **LLM cost scales unexpectedly** with card volume | Medium | Medium | Instrument per-call cost from the first call (§8.4); threshold changes move this by 10x |
 | R11 | **Scheduler never chosen**, workflows stay manual | Medium — no autonomous product | Medium | Resolve D4. "Autonomous" is in the product name; a manual pipeline is not the product |
-| R12 | **Single-developer key-person risk** on a 13.7k-line codebase | Medium | Medium | The existing discipline (strict typing, high coverage, documented contracts) is the mitigation. Maintain it — it is what makes the code transferable |
+| R12 | **Single-developer key-person risk** on a growing codebase | Medium | Medium | The existing discipline (strict typing, high coverage, documented contracts) is the mitigation. Maintain it — it is what makes the code transferable |
 
 ---
 

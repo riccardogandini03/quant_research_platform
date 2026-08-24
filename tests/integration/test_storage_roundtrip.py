@@ -302,6 +302,18 @@ def test_research_repository_roundtrips_evidence_finding_and_card(
     assert stored_finding.thesis_relevance is None
     assert repository.add_card(card).card_id == card.card_id
 
+    divergent_finding = finding.model_copy(update={"title": "Divergent immutable payload"})
+    with pytest.raises(RepositoryConflictError, match=r"finding key.*different persisted payload"):
+        repository.add_finding(divergent_finding)
+    assert repository.add_finding(finding) == finding
+
+    divergent_card = card.model_copy(
+        update={"next_research_question": "A divergent immutable question?"}
+    )
+    with pytest.raises(RepositoryConflictError, match=r"card key.*different persisted payload"):
+        repository.add_card(divergent_card)
+    assert repository.add_card(card) == card
+
 
 def test_research_repository_roundtrips_typed_thesis_assessment_and_card_lineage(
     sqlite_session: Session,
@@ -335,12 +347,14 @@ def test_research_repository_roundtrips_typed_thesis_assessment_and_card_lineage
                 node_kind="invalidation_rule",
                 score=0.0,
                 matched_feature_names=("relative_return_sector_63d",),
+                feature_snapshot_ids=(UUID("81818181-8181-4818-8818-818181818181"),),
             ),
             ThesisNodeContribution(
                 node_id="volume_risk",
                 node_kind="risk",
                 score=0.75,
                 matched_feature_names=("dollar_volume_zscore_20d",),
+                feature_snapshot_ids=(UUID("82828282-8282-4828-8828-828282828282"),),
             ),
         ),
         method_version="thesis-relevance-v1",
