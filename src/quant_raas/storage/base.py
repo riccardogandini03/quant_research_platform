@@ -57,9 +57,12 @@ class FeatureValueJSON(TypeDecorator[Any]):
         return {_FEATURE_VALUE_KEY: value}
 
     def process_result_value(self, value: Any, dialect: object) -> Any:
-        if isinstance(value, dict) and set(value) == {_FEATURE_VALUE_KEY}:
-            return value[_FEATURE_VALUE_KEY]
-        return value
+        if not isinstance(value, dict) or set(value) != {_FEATURE_VALUE_KEY}:
+            raise ValueError(
+                "feature value is not encoded by 20260821_0004; database migration "
+                "is missing or incompatible"
+            )
+        return value[_FEATURE_VALUE_KEY]
 
 
 class Base(DeclarativeBase):

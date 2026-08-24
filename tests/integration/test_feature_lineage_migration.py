@@ -97,7 +97,7 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
 
     assert _unique_columns(engine) == OLD_COLUMNS
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260821_0003")
 
     assert _unique_columns(engine) == NEW_COLUMNS
     with engine.connect() as connection:
@@ -112,7 +112,7 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 1
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260821_0003")
 
     assert _unique_columns(engine) == NEW_COLUMNS
     with engine.begin() as connection:
@@ -179,7 +179,7 @@ def test_feature_lineage_migration_preserves_data_and_round_trips(
         )
         assert connection.scalar(text("SELECT COUNT(*) FROM feature_snapshot")) == 1
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260821_0003")
 
     assert _unique_columns(engine) == NEW_COLUMNS
     with engine.connect() as connection:
