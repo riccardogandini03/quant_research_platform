@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from apps.dashboard import thesis_panel
 from apps.dashboard.thesis_panel import (
     content_from_editor_rows,
     editor_rows_from_content,
@@ -86,3 +87,39 @@ def test_parse_utc_timestamp_normalizes_offset_aware_iso8601_values(
 def test_parse_utc_timestamp_rejects_naive_values() -> None:
     with pytest.raises(ValueError, match="UTC offset"):
         parse_utc_timestamp("2024-01-10T22:00:00")
+
+
+class _EditorStreamlit:
+    def __init__(self) -> None:
+        self.text_area_values: dict[str, str] = {}
+        self.text_input_values: dict[str, str] = {}
+
+    def text_area(self, label: str, *, value: str, key: str) -> str:
+        self.text_area_values[label] = value
+        return value
+
+    def caption(self, value: str) -> None:
+        pass
+
+    def data_editor(self, value, **kwargs):
+        return value
+
+    def text_input(self, label: str, *, value: str = "", key: str) -> str:
+        self.text_input_values[label] = value
+        return value
+
+    def checkbox(self, label: str, *, key: str) -> bool:
+        return False
+
+
+def test_create_editor_requires_user_authored_summary_and_effective_time(monkeypatch) -> None:
+    streamlit = _EditorStreamlit()
+    monkeypatch.setattr(thesis_panel, "st", streamlit, raising=False)
+
+    summary, *_ = thesis_panel._render_editor(None, key_prefix="create")
+    valid_from, *_ = thesis_panel._authoring_fields(key_prefix="create")
+
+    assert summary == ""
+    assert streamlit.text_area_values["Summary"] == ""
+    assert valid_from == ""
+    assert streamlit.text_input_values["Valid from (ISO-8601 with Z or offset)"] == ""

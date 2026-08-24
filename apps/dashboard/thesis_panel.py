@@ -213,9 +213,19 @@ def _render_history(thesis, history: tuple[ThesisVersion, ...]) -> ThesisVersion
     return selected_version
 
 
-def _render_editor(initial: ThesisContent, *, key_prefix: str) -> tuple[str, list, list, list]:
-    rows = editor_rows_from_content(initial)
-    summary = st.text_area("Summary", value=initial.summary, key=f"{key_prefix}-summary")
+def _render_editor(
+    initial: ThesisContent | None, *, key_prefix: str
+) -> tuple[str, list, list, list]:
+    rows = (
+        editor_rows_from_content(initial)
+        if initial is not None
+        else ThesisEditorRows(drivers=[], risks=[], invalidation_rules=[])
+    )
+    summary = st.text_area(
+        "Summary",
+        value=initial.summary if initial is not None else "",
+        key=f"{key_prefix}-summary",
+    )
     st.caption("Feature names are comma-separated canonical identifiers.")
     drivers = st.data_editor(
         rows.drivers or _empty_rows(_DRIVER_COLUMNS),
@@ -244,7 +254,7 @@ def _render_editor(initial: ThesisContent, *, key_prefix: str) -> tuple[str, lis
 def _authoring_fields(*, key_prefix: str) -> tuple[str, str, str, bool]:
     valid_from = st.text_input(
         "Valid from (ISO-8601 with Z or offset)",
-        value=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        value="",
         key=f"{key_prefix}-valid-from",
     )
     authored_by = st.text_input("Authored by", key=f"{key_prefix}-authored-by")
@@ -365,7 +375,7 @@ def render_thesis_panel(session_factory, security_id: UUID) -> None:
         title = st.text_input("Title (immutable after creation)", key=f"{create_prefix}-title")
         created_by = st.text_input("Created by", key=f"{create_prefix}-created-by")
         summary, drivers, risks, invalidations = _render_editor(
-            ThesisContent(summary="New investment thesis."),
+            None,
             key_prefix=create_prefix,
         )
         valid_from, authored_by, approved_by, approval_confirmed = _authoring_fields(
