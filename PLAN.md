@@ -53,7 +53,7 @@ The repository contains roughly 13,700 lines of Python across `src/quant_raas`, 
 | Connectors: fixture, Yahoo | **BUILT** | Deterministic fixture provider; Yahoo behind an explicit opt-in extra |
 | Connectors: Bloomberg, LSEG, SEC, macro | **BOUNDARY** | Placeholders that raise rather than report false success. This is correct behavior, but it means no real vendor data exists yet |
 | AI layer (`ai/`) | **BOUNDARY** | `guardrails.py` is real (~129 lines). Synthesizer, filing diff, query agent, backtest agent, evals are stubs. No LLM provider is wired |
-| Apps | **PARTIAL** | FastAPI with 9 routes, Streamlit dashboard, worker entrypoint, CLI (`init-db`, `seed-demo`, `daily`) |
+| Apps | **PARTIAL** | FastAPI with 16 routes, Streamlit dashboard, worker entrypoint, CLI (`init-db`, `seed-demo`, `daily`) |
 | Multi-tenancy / auth | **PLANNED** | **No tenant concept exists anywhere.** `user_id` is a free-text feedback attribution field, not an isolation boundary |
 | Thesis model | **BUILT** | Deterministic PM-authored append-only versions, exact feature-name relevance, PIT selection, lineage, API, and dashboard workflow; semantic mapping and generated proposals remain planned |
 
