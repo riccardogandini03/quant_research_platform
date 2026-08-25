@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from quant_raas.domain.market import IngestionBatch, PriceBarRequest
+from quant_raas.connectors.base import ProviderDataError
+from quant_raas.domain.market import IngestionBatch, PriceBarRequest, PriceItemFailure
 from quant_raas.domain.protocols import MarketDataRepository, PriceDataProvider
 from quant_raas.ingestion.quality import validate_price_result
 
@@ -14,6 +15,7 @@ class PriceIngestionSummary:
     batch: IngestionBatch
     bars_received: int
     bars_inserted: int
+    failures: tuple[PriceItemFailure, ...]
 
 
 class PriceIngestionService:
@@ -30,11 +32,15 @@ class PriceIngestionService:
 
     def ingest(self, request: PriceBarRequest) -> PriceIngestionSummary:
         result = self.provider.fetch_daily_bars(request)
-        validate_price_result(request, result)
+        try:
+            validate_price_result(request, result)
+        except ValueError:
+            raise ProviderDataError("provider result failed price-ingestion validation") from None
         persisted_batch = self.repository.add_ingestion_batch(result.batch)
         inserted = self.repository.upsert_price_bars(result.bars)
         return PriceIngestionSummary(
             batch=persisted_batch,
             bars_received=len(result.bars),
             bars_inserted=inserted,
+            failures=result.failures,
         )

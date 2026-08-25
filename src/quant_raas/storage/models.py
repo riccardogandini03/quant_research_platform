@@ -200,6 +200,8 @@ class IngestionBatchRecord(Base):
     batch_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     batch_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     provider: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    original_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    usage_mode: Mapped[str] = mapped_column(String(40), nullable=False)
     dataset: Mapped[str] = mapped_column(String(80), nullable=False)
     requested_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     started_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
@@ -250,6 +252,7 @@ class PriceBarRecord(Base):
     adjustment_factor: Mapped[float | None] = mapped_column(Float)
     total_return_factor: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(80), nullable=False)
+    usage_mode: Mapped[str] = mapped_column(String(40), nullable=False)
     source_record_id: Mapped[str] = mapped_column(String(256), nullable=False)
     provider_identifier: Mapped[str | None] = mapped_column(String(128))
     ingestion_batch_id: Mapped[UUID] = mapped_column(

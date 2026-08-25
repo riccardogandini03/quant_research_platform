@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from quant_raas.common.errors import RepositoryConflictError
 from quant_raas.config import Settings
-from quant_raas.domain.enums import BatchStatus, ThesisImpact
+from quant_raas.domain.enums import BatchStatus, DataUsageMode, ThesisImpact
 from quant_raas.domain.market import FeatureSnapshot, IngestionBatch, PriceBar
 from quant_raas.domain.research import (
     EvidenceReference,
@@ -90,19 +90,29 @@ def test_in_memory_sqlite_schema_is_shared_across_api_threads() -> None:
         engine.dispose()
 
 
-def _batch(batch_id: UUID, *, row_count: int, requested_at: datetime) -> IngestionBatch:
+def _batch(
+    batch_id: UUID,
+    *,
+    row_count: int,
+    requested_at: datetime,
+    status: BatchStatus = BatchStatus.SUCCEEDED,
+    error_message: str | None = None,
+) -> IngestionBatch:
     return IngestionBatch(
         batch_id=batch_id,
         batch_key="fixture:roundtrip:2024-01-09",
         provider="fixture",
+        original_source="fixture",
         dataset="daily_price_bar",
         requested_at=requested_at,
         started_at=requested_at,
         completed_at=requested_at + timedelta(seconds=1),
-        status=BatchStatus.SUCCEEDED,
+        status=status,
         request_fingerprint="12345678fixture",
         content_hash="abcdef12fixture",
         row_count=row_count,
+        error_message=error_message,
+        usage_mode=DataUsageMode.UNVERIFIED,
     )
 
 
@@ -135,6 +145,7 @@ def _bar(
         source_record_id="EXAMPLE:2024-01-09",
         provider_identifier="EXAMPLE",
         ingestion_batch_id=batch_id,
+        usage_mode=DataUsageMode.UNVERIFIED,
     )
 
 
@@ -154,9 +165,11 @@ def test_price_and_feature_repositories_return_latest_knowable_vintage(
 
     market_repository = SqlAlchemyMarketDataRepository(sqlite_session)
     requested_at = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
-    market_repository.add_ingestion_batch(
-        _batch(ingestion_batch_id, row_count=2, requested_at=requested_at)
-    )
+    batch = _batch(ingestion_batch_id, row_count=2, requested_at=requested_at)
+    market_repository.add_ingestion_batch(batch)
+    stored_batch = market_repository.add_ingestion_batch(batch)
+    assert stored_batch.original_source == "fixture"
+    assert stored_batch.usage_mode == DataUsageMode.UNVERIFIED
     old_available = datetime(2024, 1, 9, 21, 5, tzinfo=UTC)
     revised_available = datetime(2024, 1, 10, 9, 0, tzinfo=UTC)
     old_bar = _bar(
@@ -193,6 +206,7 @@ def test_price_and_feature_repositories_return_latest_knowable_vintage(
     )
     assert [bar.close for bar in before_revision] == [100.0]
     assert [bar.close for bar in after_revision] == [105.0]
+    assert all(bar.usage_mode == DataUsageMode.UNVERIFIED for bar in after_revision)
 
     feature_repository = SqlAlchemyFeatureRepository(sqlite_session)
     old_feature = FeatureSnapshot(
@@ -231,6 +245,31 @@ def test_price_and_feature_repositories_return_latest_knowable_vintage(
         effective_at=effective,
         knowledge_time=revised_available,
     )[0].value == pytest.approx(0.05)
+
+
+def test_market_data_repository_roundtrips_failed_batch_provenance_without_bars(
+    sqlite_session: Session,
+    ingestion_batch_id: UUID,
+) -> None:
+    repository = SqlAlchemyMarketDataRepository(sqlite_session)
+    requested_at = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
+    batch = _batch(
+        ingestion_batch_id,
+        row_count=0,
+        requested_at=requested_at,
+        status=BatchStatus.FAILED,
+        error_message="EXAMPLE: no completed daily rows",
+    )
+
+    assert repository.add_ingestion_batch(batch) == batch
+    stored = repository.add_ingestion_batch(batch)
+
+    assert stored.status == BatchStatus.FAILED
+    assert stored.original_source == "fixture"
+    assert stored.usage_mode == DataUsageMode.UNVERIFIED
+    assert stored.row_count == 0
+    assert stored.error_message == "EXAMPLE: no completed daily rows"
+    assert sqlite_session.scalar(text("SELECT count(*) FROM price_bar")) == 0
 
 
 def test_research_repository_roundtrips_evidence_finding_and_card(

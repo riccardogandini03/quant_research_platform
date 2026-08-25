@@ -16,6 +16,8 @@ from quant_raas.domain.enums import (
     BatchStatus,
     CorporateActionType,
     DataQualityFlag,
+    DataUsageMode,
+    PriceFailureCategory,
 )
 
 
@@ -48,6 +50,8 @@ class IngestionBatch(DomainModel):
     batch_id: UUID = Field(default_factory=uuid4)
     batch_key: str = Field(min_length=8, max_length=128)
     provider: str = Field(min_length=1, max_length=80)
+    original_source: str = Field(min_length=1, max_length=80)
+    usage_mode: DataUsageMode
     dataset: str = Field(min_length=1, max_length=80)
     requested_at: UtcDatetime
     started_at: UtcDatetime
@@ -75,9 +79,12 @@ class IngestionBatch(DomainModel):
 class PriceBar(DomainModel):
     """One normalized bar with both market time and knowledge time.
 
-    `effective_at` is the bar's market close, `available_at` is when the value
-    first became knowable, and `ingested_at` is when this system received it.
-    Keeping all three prevents a historical run from seeing a later correction.
+    `effective_at` is the bar's market close, except that a midnight-UTC date
+    key is permitted when `ESTIMATED_TIMESTAMP` is present. `available_at` is
+    when the value first became knowable, and `ingested_at` is when this system
+    received it. Keeping all three prevents a historical run from seeing a
+    later correction. `usage_mode` is a handling restriction, not evidence
+    that the source's contractual entitlements have been approved.
     """
 
     price_bar_id: UUID = Field(default_factory=uuid4)
@@ -97,6 +104,7 @@ class PriceBar(DomainModel):
     adjustment_factor: float | None = Field(default=None, gt=0)
     total_return_factor: float | None = Field(default=None, gt=0)
     source: str = Field(min_length=1, max_length=80)
+    usage_mode: DataUsageMode
     source_record_id: str = Field(min_length=1, max_length=256)
     provider_identifier: str | None = Field(default=None, max_length=128)
     ingestion_batch_id: UUID
@@ -124,11 +132,20 @@ class PriceBar(DomainModel):
         return self
 
 
+class PriceItemFailure(DomainModel):
+    """Sanitized item-level failure from an otherwise healthy provider call."""
+
+    provider_identifier: str = Field(min_length=1, max_length=128)
+    category: PriceFailureCategory
+    message: str = Field(min_length=1, max_length=500)
+
+
 class PriceIngestionResult(DomainModel):
     """Atomic provider response passed from a connector to ingestion."""
 
     batch: IngestionBatch
     bars: tuple[PriceBar, ...]
+    failures: tuple[PriceItemFailure, ...] = ()
 
 
 class CorporateAction(DomainModel):

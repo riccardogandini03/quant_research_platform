@@ -228,7 +228,7 @@ def test_upgrade_encodes_every_legacy_json_kind_without_reserved_key_collision(
         assert _plain_ids(engine)["bool_value"] == str(UUID(int=1000))
         assert _plain_ids(engine)["int_value"] == UUID(int=1001).hex
 
-        command.upgrade(config, "head")
+        command.upgrade(config, ENCODING_REVISION)
 
         _assert_json_values_exact(_current_values(engine), LEGACY_VALUES_AFTER_SQLITE_AFFINITY)
         _assert_json_values_exact(
@@ -243,25 +243,25 @@ def test_upgrade_encodes_every_legacy_json_kind_without_reserved_key_collision(
         get_settings.cache_clear()
 
 
-def test_head_writes_round_trip_and_downgrade_unwraps_exactly_once(
+def test_encoding_revision_writes_round_trip_and_downgrade_unwraps_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url = f"sqlite+pysqlite:///{(tmp_path / 'feature-value-roundtrip.db').as_posix()}"
     config = _config(monkeypatch, url)
     command.upgrade(config, PRE_LINEAGE_REVISION)
-    command.upgrade(config, "head")
+    command.upgrade(config, ENCODING_REVISION)
     engine = create_engine(url)
-    head_values: dict[str, Any] = {
+    encoding_values: dict[str, Any] = {
         **LEGACY_VALUES_AFTER_SQLITE_AFFINITY,
         "integral_float": 1.0,
         "negative_zero": -0.0,
     }
     hyphenated_values = {"hyphenated_head_value": {"driver": "legacy"}}
-    all_head_values = {**head_values, **hyphenated_values}
+    all_encoding_values = {**encoding_values, **hyphenated_values}
     try:
         _insert_supporting_records(engine)
-        snapshots = _snapshots(head_values)
+        snapshots = _snapshots(encoding_values)
         with Session(engine) as session:
             assert SqlAlchemyFeatureRepository(session).upsert_many(snapshots) == len(snapshots)
             session.commit()
@@ -273,8 +273,8 @@ def test_head_writes_round_trip_and_downgrade_unwraps_exactly_once(
             encoded=True,
         )
 
-        _assert_json_values_exact(_current_values(engine), all_head_values)
-        raw_before = _enveloped(all_head_values)
+        _assert_json_values_exact(_current_values(engine), all_encoding_values)
+        raw_before = _enveloped(all_encoding_values)
         _assert_json_values_exact(_plain_values(engine), raw_before)
         assert _plain_ids(engine)["hyphenated_head_value"] == str(UUID(int=4000))
         assert _plain_ids(engine)["bool_value"] == UUID(int=2000).hex
@@ -290,7 +290,7 @@ def test_head_writes_round_trip_and_downgrade_unwraps_exactly_once(
         _assert_json_values_exact(_plain_values(engine), raw_before)
 
         remediated_values = {
-            **all_head_values,
+            **all_encoding_values,
             "integral_float": 1.5,
             "negative_zero": -0.5,
         }
@@ -315,7 +315,7 @@ def test_head_writes_round_trip_and_downgrade_unwraps_exactly_once(
         _assert_json_values_exact(_plain_values(engine), remediated_values)
         assert _revision(engine) == PRE_LINEAGE_REVISION
 
-        command.upgrade(config, "head")
+        command.upgrade(config, ENCODING_REVISION)
 
         _assert_json_values_exact(_current_values(engine), remediated_values)
         _assert_json_values_exact(_plain_values(engine), _enveloped(remediated_values))
@@ -333,7 +333,7 @@ def test_strict_decoder_and_downgrade_preflight_reject_unencoded_head_row(
 ) -> None:
     url = f"sqlite+pysqlite:///{(tmp_path / 'feature-value-strict.db').as_posix()}"
     config = _config(monkeypatch, url)
-    command.upgrade(config, "head")
+    command.upgrade(config, ENCODING_REVISION)
     engine = create_engine(url)
     valid_values = {"valid_value": {"nested": [True, 7, 1.25, None]}}
     invalid_values = {"unencoded_value": {"legacy": "raw"}}
@@ -415,7 +415,7 @@ def test_upgrade_requires_every_buffered_row_update_to_match_exactly_once(
                 r"updated 0"
             ),
         ):
-            command.upgrade(config, "head")
+            command.upgrade(config, ENCODING_REVISION)
 
         assert _revision(engine) == PRE_ENCODING_REVISION
         _assert_json_values_exact(_plain_values(engine), values)
@@ -423,7 +423,7 @@ def test_upgrade_requires_every_buffered_row_update_to_match_exactly_once(
         with engine.begin() as connection:
             connection.execute(text("DROP TRIGGER ignore_feature_value_update"))
 
-        command.upgrade(config, "head")
+        command.upgrade(config, ENCODING_REVISION)
 
         _assert_json_values_exact(_current_values(engine), values)
         _assert_json_values_exact(_plain_values(engine), _enveloped(values))

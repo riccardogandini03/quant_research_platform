@@ -49,6 +49,20 @@ class BatchStatus(StrEnum):
     FAILED = "failed"
 
 
+class DataUsageMode(StrEnum):
+    RESEARCH_ONLY = "research_only"
+    PUBLIC = "public"
+    SYNTHETIC = "synthetic"
+    USER_SUPPLIED = "user_supplied"
+    UNVERIFIED = "unverified"
+
+
+class PriceFailureCategory(StrEnum):
+    NO_DATA = "no_data"
+    INVALID_IDENTIFIER = "invalid_identifier"
+    INVALID_CURRENCY = "invalid_currency"
+
+
 class DataQualityFlag(StrEnum):
     STALE = "stale"
     MISSING = "missing"

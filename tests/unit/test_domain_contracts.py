@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from quant_raas.common.clock import ensure_utc
-from quant_raas.domain.enums import EventType, IdentifierScheme, SourceType
+from quant_raas.domain.enums import DataUsageMode, EventType, IdentifierScheme, SourceType
 from quant_raas.domain.events import CompanyEvent
 from quant_raas.domain.market import FeatureSnapshot, PriceBar
 from quant_raas.domain.research import EvidenceReference, QuantMetric
@@ -96,6 +96,7 @@ def test_numeric_contracts_reject_non_finite_values(
             source="fixture",
             source_record_id="ABC:2024-01-02",
             ingestion_batch_id=ingestion_batch_id,
+            usage_mode=DataUsageMode.UNVERIFIED,
         )
 
 

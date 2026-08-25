@@ -24,7 +24,7 @@ from quant_raas.common.errors import (
     IdentifierNotFoundError,
     RepositoryConflictError,
 )
-from quant_raas.domain.enums import BenchmarkKind, SecurityStatus, ThesisStatus
+from quant_raas.domain.enums import BenchmarkKind, DataUsageMode, SecurityStatus, ThesisStatus
 from quant_raas.domain.events import CompanyEvent
 from quant_raas.domain.market import CorporateAction, FeatureSnapshot, IngestionBatch, PriceBar
 from quant_raas.domain.portfolio import (
@@ -540,6 +540,8 @@ class SqlAlchemyMarketDataRepository:
                     "batch_id": existing.batch_id,
                     "batch_key": existing.batch_key,
                     "provider": existing.provider,
+                    "original_source": existing.original_source,
+                    "usage_mode": existing.usage_mode,
                     "dataset": existing.dataset,
                     "requested_at": existing.requested_at,
                     "started_at": existing.started_at,
@@ -553,6 +555,7 @@ class SqlAlchemyMarketDataRepository:
             )
         values = batch.model_dump(mode="python")
         values["status"] = batch.status.value
+        values["usage_mode"] = batch.usage_mode.value
         self.session.add(IngestionBatchRecord(**values))
         self.session.flush()
         return batch
@@ -595,6 +598,7 @@ class SqlAlchemyMarketDataRepository:
                 continue
             values = bar.model_dump(mode="python")
             values["frequency"] = bar.frequency.value
+            values["usage_mode"] = bar.usage_mode.value
             values["quality_flags"] = [flag.value for flag in bar.quality_flags]
             self.session.add(PriceBarRecord(**values))
             inserted += 1
@@ -660,6 +664,7 @@ def _price_bar_from_record(row: PriceBarRecord) -> PriceBar:
             "adjustment_factor": row.adjustment_factor,
             "total_return_factor": row.total_return_factor,
             "source": row.source,
+            "usage_mode": DataUsageMode(row.usage_mode),
             "source_record_id": row.source_record_id,
             "provider_identifier": row.provider_identifier,
             "ingestion_batch_id": row.ingestion_batch_id,

@@ -18,7 +18,7 @@ from quant_raas.connectors.base import (
     fingerprint_request,
     stable_batch_id,
 )
-from quant_raas.domain.enums import BatchStatus, DataQualityFlag
+from quant_raas.domain.enums import BatchStatus, DataQualityFlag, DataUsageMode
 from quant_raas.domain.market import IngestionBatch, PriceBar, PriceBarRequest, PriceIngestionResult
 from quant_raas.normalization.price_bars import normalize_price_frame
 
@@ -116,6 +116,8 @@ class YahooFinancePriceProvider:
             batch_id=batch_id,
             batch_key=batch_key(self.name, request),
             provider=self.name,
+            original_source=self.name,
+            usage_mode=DataUsageMode.PUBLIC,
             dataset="daily_price_bar",
             requested_at=request.requested_at,
             started_at=started_at,
@@ -190,6 +192,7 @@ class YahooFinancePriceProvider:
                     currency=self._default_currency,
                     adjustment_factor=adjusted_close / close,
                     source=self.name,
+                    usage_mode=DataUsageMode.PUBLIC,
                     source_record_id=f"{provider_identifier}:{session_date.isoformat()}",
                     provider_identifier=provider_identifier,
                     ingestion_batch_id=batch_id,
