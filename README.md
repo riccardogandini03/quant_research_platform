@@ -3,47 +3,12 @@
 Quant RaaS is an early-stage, point-in-time equity-research platform. It is
 designed to turn market and company observations into a small set of ranked,
 evidence-linked quantitative findings for a portfolio manager or analyst.
-Holdings are relevance context; this repository is not an order-management,
-execution, or accounting system.
-
-The repository is being built from [PLAN.md](PLAN.md). Interfaces and
-modules present in the tree are foundations, not a claim that every planned data
-source, screen, model, or UI is production-ready.
-
-## Current foundation
-
-The Phase 0/1 foundation covers or defines:
-
-- typed securities, identifiers, holdings, events, features, findings, and cards;
-- time-aware storage contracts and provider-neutral connector boundaries;
-- deterministic price normalization and quantitative calculations;
-- materiality and factor configuration examples;
-- point-in-time rules that prevent later vintages entering earlier snapshots;
-- PM-authored, append-only investment-thesis versions with explicit approval and archival controls;
-- deterministic thesis relevance from exact feature-name matching and threshold-based invalidation proximity, with version and feature lineage;
-- SQLite development and PostgreSQL-compatible persistence foundations; and
-- network-free unit, integration, and point-in-time testing conventions.
-
-Thesis authoring and relevance are deliberately deterministic: they do not map
-unstructured text semantically or generate thesis proposals. Attribution fields
-(`created_by`, `authored_by`, and `approved_by`) record caller-supplied names and
-are not authenticated identities. Missing theses never block research; an
-explicit zero-overlap assessment is instead a valid observed input. The 0.15
-thesis-relevance component raises the current price-only theoretical materiality
-ceiling from 0.45 to 0.60, still below the 0.65 `material` threshold.
-
-Estimate histories, licensed Bloomberg/LSEG feeds, filing/news synthesis, and
-production deployment remain dependent on implementation, entitlements, and
-validation. Disabled configuration files make those dependencies explicit.
 
 ## Requirements
 
 - Python 3.12 or 3.13
 - Git
 - Docker with Compose only if using the containerized development database
-
-Python 3.14 is intentionally outside the supported range until the numerical and
-vendor dependency set has been validated against it.
 
 ## Local setup
 
@@ -78,16 +43,6 @@ python -m pip install -e ".[dev,api,dashboard,postgres]"
 python -m pip install -e ".[public-data]"
 ```
 
-| Extra | Purpose | Important limitation |
-|---|---|---|
-| `api` | FastAPI and Uvicorn composition | An API shell is not production security. |
-| `dashboard` | Streamlit and Plotly research UI | UI output is only as reliable as its typed inputs. |
-| `postgres` | PostgreSQL driver | A deployed database still needs backup and access controls. |
-| `calendar` | Exchange-session calendars | Calendar mappings must be validated per security. |
-| `public-data` | Opt-in Yahoo prototype connector | Not an authoritative production market-data feed. |
-| `lseg` | LSEG Data Library | Requires contracted entitlements and an approved session. |
-| `bloomberg` | Bloomberg integration boundary | Install the SDK through the approved Bloomberg channel. |
-
 See [vendor entitlements](docs/vendor_entitlements.md) before enabling an
 external connector. The default test suite never uses network or licensed feeds.
 
@@ -98,6 +53,8 @@ Version-controlled research settings live under `configs/`:
 - `materiality/default.yaml` defines deterministic score v0;
 - `factors/mvp.yaml` records return, regression, and normalization conventions;
 - `screens/` contains two Phase-1 screens and one disabled later-phase example;
+- `thesis/relevance.yaml` defines deterministic thesis-impact thresholds;
+- `thesis/demo.yaml` contains explicitly approved, PM-authored demo theses;
 - `universes/demo.csv` demonstrates canonical and external identifier metadata.
 
 Use [examples/holdings.csv](examples/holdings.csv) for held-name context and
@@ -117,9 +74,10 @@ Seed a complete network-free example after installation:
 ```
 
 The command registers four covered equities plus two benchmark instruments,
-ingests 3,000 deterministic synthetic bars, and writes one daily research card
-for every covered name. It is safe to rerun against the same local database.
-With the `api` or `dashboard` extra installed, inspect the result locally:
+seeds immutable version-one theses, ingests 3,000 deterministic synthetic bars,
+and writes one daily research card for every covered name. It is safe to rerun
+against the same local database. With the `api` or `dashboard` extra installed,
+inspect the result locally:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --reload
