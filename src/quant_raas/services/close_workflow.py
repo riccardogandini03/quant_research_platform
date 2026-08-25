@@ -14,7 +14,7 @@ from sqlalchemy import desc, func, select
 
 from quant_raas.common.clock import ensure_utc
 from quant_raas.config import Settings
-from quant_raas.runtime import materiality_scorer, repositories_for
+from quant_raas.runtime import materiality_scorer, repositories_for, thesis_relevance_evaluator
 from quant_raas.services.daily_research import (
     DailyResearchRequest,
     DailyResearchResult,
@@ -83,8 +83,10 @@ def run_close_workflow(
             portfolios=repos.portfolios,
             market_data=repos.market_data,
             features=repos.features,
+            theses=repos.theses,
             research=repos.research,
             materiality=materiality_scorer(settings),
+            thesis_relevance=thesis_relevance_evaluator(settings),
         )
         return service.run(
             DailyResearchRequest(

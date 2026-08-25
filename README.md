@@ -53,6 +53,8 @@ Version-controlled research settings live under `configs/`:
 - `materiality/default.yaml` defines deterministic score v0;
 - `factors/mvp.yaml` records return, regression, and normalization conventions;
 - `screens/` contains two Phase-1 screens and one disabled later-phase example;
+- `thesis/relevance.yaml` defines deterministic thesis-impact thresholds;
+- `thesis/demo.yaml` contains explicitly approved, PM-authored demo theses;
 - `universes/demo.csv` demonstrates canonical and external identifier metadata.
 
 Use [examples/holdings.csv](examples/holdings.csv) for held-name context and
@@ -72,9 +74,10 @@ Seed a complete network-free example after installation:
 ```
 
 The command registers four covered equities plus two benchmark instruments,
-ingests 3,000 deterministic synthetic bars, and writes one daily research card
-for every covered name. It is safe to rerun against the same local database.
-With the `api` or `dashboard` extra installed, inspect the result locally:
+seeds immutable version-one theses, ingests 3,000 deterministic synthetic bars,
+and writes one daily research card for every covered name. It is safe to rerun
+against the same local database. With the `api` or `dashboard` extra installed,
+inspect the result locally:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --reload

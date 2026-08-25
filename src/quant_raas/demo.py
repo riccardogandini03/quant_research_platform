@@ -6,18 +6,21 @@ import csv
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from quant_raas.config import Settings
 from quant_raas.connectors.fixture import FixturePriceProvider
-from quant_raas.domain.enums import IdentifierScheme, SecurityStatus, SecurityType
+from quant_raas.domain.enums import IdentifierScheme, SecurityStatus, SecurityType, ThesisStatus
 from quant_raas.domain.market import PriceBarRequest, PriceRequestItem
+from quant_raas.domain.research import ThesisContent
 from quant_raas.domain.security import Security, SecurityIdentifier
 from quant_raas.ingestion.prices import PriceIngestionService, PriceIngestionSummary
-from quant_raas.runtime import materiality_scorer, repositories_for
+from quant_raas.runtime import materiality_scorer, repositories_for, thesis_relevance_evaluator
 from quant_raas.security_master.importer import parse_coverage_csv, parse_holdings_csv
 from quant_raas.security_master.service import SecurityMasterService
 from quant_raas.services.daily_research import (
@@ -25,6 +28,7 @@ from quant_raas.services.daily_research import (
     DailyResearchResult,
     DailyResearchService,
 )
+from quant_raas.services.theses import ThesisService
 from quant_raas.storage.session import create_schema, create_session_factory, create_sql_engine
 
 
@@ -49,6 +53,30 @@ def _optional_iso_date(value: str | None) -> date | None:
     """Parse optional ISO dates before crossing the typed domain boundary."""
 
     return date.fromisoformat(value) if value else None
+
+
+def _required_demo_thesis_value(item: Mapping[str, object], field: str) -> str:
+    value = item.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"demo thesis is missing {field!r}")
+    return value
+
+
+def _load_demo_theses(path: Path) -> tuple[dict[str, object], ...]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("demo thesis fixture requires schema_version 1")
+    raw_items = payload.get("theses")
+    if not isinstance(raw_items, list):
+        raise ValueError("demo thesis fixture requires a theses list")
+    items: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("each demo thesis must be a mapping")
+        item = dict(raw_item)
+        item["content"] = ThesisContent.model_validate(item.get("content"))
+        items.append(item)
+    return tuple(items)
 
 
 def generate_demo_price_frames(
@@ -114,10 +142,12 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
     project_root = settings.config_directory.resolve().parent
     coverage_path = project_root / "examples" / "coverage.csv"
     holdings_path = project_root / "examples" / "holdings.csv"
+    thesis_path = settings.config_directory / "thesis" / "demo.yaml"
+    demo_context_at = current - timedelta(days=7)
 
     with factory.begin() as session:
         repos = repositories_for(session)
-        master = SecurityMasterService(repos.securities, repos.portfolios)
+        master = SecurityMasterService(repos.securities, repos.portfolios, repos.theses)
         universe_rows = list(csv.DictReader(universe_path.read_text(encoding="utf-8").splitlines()))
         for row in universe_rows:
             security_id = UUID(_required_csv_value(row, "security_id"))
@@ -152,13 +182,59 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
             )
             master.register_security(security, [identifier])
 
+        thesis_service = ThesisService(
+            repos.securities,
+            repos.theses,
+            clock=lambda: demo_context_at,
+        )
+        for item in _load_demo_theses(thesis_path):
+            thesis_key = _required_demo_thesis_value(item, "thesis_key")
+            security_id = UUID(_required_demo_thesis_value(item, "security_id"))
+            title = _required_demo_thesis_value(item, "title")
+            authored_by = _required_demo_thesis_value(item, "authored_by")
+            approved_by = _required_demo_thesis_value(item, "approved_by")
+            content = item["content"]
+            assert isinstance(content, ThesisContent)
+            existing = repos.theses.get_by_key(thesis_key)
+            if existing is None:
+                thesis_service.create(
+                    thesis_key=thesis_key,
+                    security_id=security_id,
+                    title=title,
+                    content=content,
+                    created_by=authored_by,
+                    authored_by=authored_by,
+                    approved_by=approved_by,
+                    valid_from=demo_context_at,
+                )
+                continue
+            history = tuple(repos.theses.list_versions(existing.thesis_id))
+            if not (
+                existing.security_id == security_id
+                and existing.title == title
+                and existing.status is ThesisStatus.ACTIVE
+                and existing.created_by == authored_by
+                and len(history) == 1
+                and history[0].version == 1
+                and history[0].valid_to is None
+                and existing.created_at
+                == history[0].valid_from
+                == history[0].approved_at
+                == history[0].created_at
+                <= demo_context_at
+                and history[0].content == content
+                and history[0].authored_by == authored_by
+                and history[0].approved_by == approved_by
+            ):
+                raise ValueError(f"existing demo thesis {thesis_key!r} differs from fixture")
+
         parsed_coverage = parse_coverage_csv(coverage_path)
         if not parsed_coverage.is_valid:
             raise ValueError(f"bundled coverage example is invalid: {parsed_coverage.issues}")
         coverage = master.import_coverage(
             parsed_coverage.rows,
             name="Offline Demo Coverage",
-            as_of=current - timedelta(days=7),
+            as_of=demo_context_at,
             description="Synthetic data only; safe for local workflow evaluation.",
         )
         if not coverage.is_valid or coverage.coverage_list is None:
@@ -170,7 +246,7 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
         holdings = master.import_holdings(
             parsed_holdings.rows,
             portfolio_name="Offline Demo Holdings Context",
-            as_of=current - timedelta(days=7),
+            as_of=demo_context_at,
             source_name=str(holdings_path),
             source_hash=parsed_holdings.source_hash,
         )
@@ -212,8 +288,10 @@ def seed_demo(settings: Settings, *, now: datetime | None = None) -> DemoSeedRes
             portfolios=repos.portfolios,
             market_data=repos.market_data,
             features=repos.features,
+            theses=repos.theses,
             research=repos.research,
             materiality=materiality_scorer(settings),
+            thesis_relevance=thesis_relevance_evaluator(settings),
             clock=lambda: current,
         ).run(
             DailyResearchRequest(

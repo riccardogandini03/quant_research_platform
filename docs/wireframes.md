@@ -62,8 +62,25 @@ the position modifier separately. “No finding” is a valid daily result.
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+The company page includes a deterministic thesis panel:
+
+```text
+Investment thesis: ASML core thesis                         ACTIVE / v4
+Summary: EUV pricing power; China restrictions remain manageable
+Driver: EUV volumes | supporting: eps_revision_fy3 | direction: positive
+Risk: export controls | watch: policy_restriction_index | severity: high
+Invalidation: FY27 EPS revision | eps_revision_fy3 <= warning -10% / breach -15%
+              unit: percent | state: not evaluated
+Version history: [v1] [v2] [v3] [v4]       [Append version] [Approve version]
+Attribution: caller-supplied, unauthenticated              [Archive thesis]
+```
+
 The page always exposes sample size, as-of time, units, and calculation window.
 Unavailable later-phase panels show “not configured,” never a fabricated zero.
+No active thesis is also valid: research remains available without one. When a
+thesis is evaluated but has no feature overlap, relevance is explicitly zero;
+that observed input adds 0.15 completeness. The price-only theoretical ceiling
+therefore rises from 0.45 to 0.60, still below the 0.65 `material` threshold.
 
 ## Factor and risk lab
 

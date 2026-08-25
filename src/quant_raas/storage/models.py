@@ -29,7 +29,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from quant_raas.storage.base import Base, UTCDateTime
+from quant_raas.storage.base import Base, FeatureValueJSON, UTCDateTime
 
 
 class SecurityRecord(Base):
@@ -376,6 +376,7 @@ class FeatureSnapshotRecord(Base):
             "available_at",
             "code_version",
             "config_version",
+            "research_run_id",
             name="uq_feature_snapshot_vintage",
         ),
         Index(
@@ -396,7 +397,7 @@ class FeatureSnapshotRecord(Base):
     effective_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     available_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     calculated_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
-    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    value: Mapped[Any] = mapped_column(FeatureValueJSON(), nullable=False)
     unit: Mapped[str | None] = mapped_column(String(40))
     window: Mapped[str | None] = mapped_column(String(80))
     quality_flags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -436,6 +437,10 @@ class ResearchFindingRecord(Base):
     materiality_tier: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     confidence: Mapped[str] = mapped_column(String(40), nullable=False)
     portfolio_weight: Mapped[float | None] = mapped_column(Float)
+    thesis_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("thesis_version.thesis_version_id", ondelete="RESTRICT")
+    )
+    thesis_relevance: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSON, nullable=False, default=dict
     )
@@ -461,6 +466,10 @@ class ResearchCardRecord(Base):
     context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     thesis_impact: Mapped[str] = mapped_column(String(40), nullable=False)
     thesis_node_id: Mapped[str | None] = mapped_column(String(128))
+    thesis_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("thesis_version.thesis_version_id", ondelete="RESTRICT")
+    )
+    thesis_node_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     key_risk_or_opportunity: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[str] = mapped_column(String(40), nullable=False)
     next_research_question: Mapped[str | None] = mapped_column(Text)
@@ -540,6 +549,10 @@ class ThesisRecord(Base):
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
+    thesis_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_by: Mapped[str] = mapped_column(String(160), nullable=False)
+    archived_at: Mapped[Any | None] = mapped_column(UTCDateTime())
+    archived_by: Mapped[str | None] = mapped_column(String(160))
 
 
 class ThesisVersionRecord(Base):
@@ -554,6 +567,7 @@ class ThesisVersionRecord(Base):
     valid_from: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     valid_to: Mapped[Any | None] = mapped_column(UTCDateTime())
     nodes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    authored_by: Mapped[str] = mapped_column(String(160), nullable=False)
     approved_by: Mapped[str] = mapped_column(String(160), nullable=False)
     approved_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)
     created_at: Mapped[Any] = mapped_column(UTCDateTime(), nullable=False)

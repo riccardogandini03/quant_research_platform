@@ -130,6 +130,32 @@ class ThesisStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class ThesisDirection(StrEnum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    MIXED = "mixed"
+
+
+class ThesisRiskSeverity(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class InvalidationComparator(StrEnum):
+    GREATER_THAN_OR_EQUAL = "greater_than_or_equal"
+    LESS_THAN_OR_EQUAL = "less_than_or_equal"
+
+
+class ThesisSelectionStatus(StrEnum):
+    SELECTED = "selected"
+    NOT_KNOWN_AT_CUTOFF = "not_known_at_cutoff"
+    NOT_YET_APPROVED = "not_yet_approved"
+    NOT_YET_EFFECTIVE = "not_yet_effective"
+    ARCHIVED_AT_CUTOFF = "archived_at_cutoff"
+    EXPIRED_AT_CUTOFF = "expired_at_cutoff"
+
+
 class SourceType(StrEnum):
     MARKET_DATA = "market_data"
     COMPANY_EVENT = "company_event"

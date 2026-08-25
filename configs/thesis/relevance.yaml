@@ -1,0 +1,7 @@
+schema_version: 1
+method_version: thesis-relevance-v1
+zero_impact: none
+impact_thresholds:
+  - {name: high, minimum_score: 0.75}
+  - {name: moderate, minimum_score: 0.50}
+  - {name: low, minimum_score: 0.00}

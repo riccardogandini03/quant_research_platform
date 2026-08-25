@@ -8,7 +8,7 @@ from datetime import datetime
 from uuid import UUID
 
 from quant_raas.domain.enums import ConfidenceLevel, FindingCategory
-from quant_raas.domain.research import QuantMetric, ResearchFinding
+from quant_raas.domain.research import QuantMetric, ResearchFinding, ThesisRelevanceAssessment
 from quant_raas.research.ids import stable_research_id
 from quant_raas.research.materiality import MaterialityScorer
 
@@ -53,6 +53,21 @@ def _bounded_anomaly(value: float | None, *, full_score_at: float = 4.0) -> floa
     return None if value is None else min(abs(value) / full_score_at, 1.0)
 
 
+def price_signal_strengths(snapshot: PriceResearchSnapshot) -> dict[str, float]:
+    """Return the shared normalized strengths used by finding and thesis scoring."""
+
+    values = {
+        "residual_return_zscore_1d": _bounded_anomaly(snapshot.residual_zscore),
+        "dollar_volume_zscore_20d": _bounded_anomaly(snapshot.volume_zscore),
+        "relative_return_sector_63d": (
+            min(abs(snapshot.relative_return_sector_63d) / 0.20, 1.0)
+            if snapshot.relative_return_sector_63d is not None
+            else None
+        ),
+    }
+    return {name: value for name, value in values.items() if value is not None}
+
+
 def _metric(
     name: str, value: float | None, unit: str, as_of: datetime, horizon: str
 ) -> QuantMetric | None:
@@ -67,16 +82,14 @@ def build_price_finding(
     research_run_id: UUID,
     scorer: MaterialityScorer,
     position_weight: float | None = None,
+    thesis_assessment: ThesisRelevanceAssessment | None = None,
 ) -> ResearchFinding:
     """Emit one daily finding, including a routine snapshot when no alert fires."""
 
-    residual_score = _bounded_anomaly(snapshot.residual_zscore)
-    volume_score = _bounded_anomaly(snapshot.volume_zscore)
-    factor_change = (
-        min(abs(snapshot.relative_return_sector_63d) / 0.20, 1.0)
-        if snapshot.relative_return_sector_63d is not None
-        else None
-    )
+    strengths = price_signal_strengths(snapshot)
+    residual_score = strengths.get("residual_return_zscore_1d")
+    volume_score = strengths.get("dollar_volume_zscore_20d")
+    factor_change = strengths.get("relative_return_sector_63d")
     available_anomaly_scores = [
         value for value in (residual_score, volume_score) if value is not None
     ]
@@ -89,6 +102,9 @@ def build_price_finding(
             # Statistical rarity is an objective Phase-1 novelty proxy. It is
             # not a substitute for later news/filing catalyst novelty.
             "event_novelty": event_novelty,
+            "thesis_relevance": (
+                thesis_assessment.score if thesis_assessment is not None else None
+            ),
         },
         position_weight=position_weight,
     )
@@ -165,5 +181,9 @@ def build_price_finding(
         materiality_tier=tier,
         confidence=confidence,
         portfolio_weight=position_weight,
+        thesis_version_id=(
+            thesis_assessment.thesis_version_id if thesis_assessment is not None else None
+        ),
+        thesis_relevance=thesis_assessment,
         metadata={"observations": snapshot.observations, "generator": "price-mvp-v0"},
     )

@@ -139,9 +139,7 @@ def test_content_normalizes_features_and_rejects_duplicate_node_ids() -> None:
     content = thesis_content()
     assert content.drivers[0].supporting_features == ("relative_return_sector_63d",)
     with pytest.raises(ValidationError, match="schema_version"):
-        ThesisContent.model_validate(
-            {**content.model_dump(mode="python"), "schema_version": 2}
-        )
+        ThesisContent.model_validate({**content.model_dump(mode="python"), "schema_version": 2})
     payload = content.model_dump(mode="python")
     payload["risks"][0]["node_id"] = "relative_strength"
     with pytest.raises(ValidationError, match="node IDs must be unique"):
@@ -597,13 +595,9 @@ Use exact-name dictionaries keyed by feature name. Driver/risk overlap uses the 
 
 ```python
 if rule.comparator == InvalidationComparator.GREATER_THAN_OR_EQUAL:
-    proximity = (value - rule.warning_threshold) / (
-        rule.breach_threshold - rule.warning_threshold
-    )
+    proximity = (value - rule.warning_threshold) / (rule.breach_threshold - rule.warning_threshold)
 else:
-    proximity = (rule.warning_threshold - value) / (
-        rule.warning_threshold - rule.breach_threshold
-    )
+    proximity = (rule.warning_threshold - value) / (rule.warning_threshold - rule.breach_threshold)
 score = min(max(proximity, 0.0), 1.0)
 ```
 
@@ -730,14 +724,22 @@ def test_thesis_migration_backfills_legacy_rows(
         )
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        row = connection.execute(
-            text("SELECT thesis_key, created_by FROM thesis WHERE thesis_id=:id"),
-            {"id": str(thesis_id)},
-        ).mappings().one()
-        version = connection.execute(
-            text("SELECT authored_by FROM thesis_version WHERE thesis_version_id=:id"),
-            {"id": str(version_id)},
-        ).mappings().one()
+        row = (
+            connection.execute(
+                text("SELECT thesis_key, created_by FROM thesis WHERE thesis_id=:id"),
+                {"id": str(thesis_id)},
+            )
+            .mappings()
+            .one()
+        )
+        version = (
+            connection.execute(
+                text("SELECT authored_by FROM thesis_version WHERE thesis_version_id=:id"),
+                {"id": str(version_id)},
+            )
+            .mappings()
+            .one()
+        )
     assert row["thesis_key"] == f"legacy_{thesis_id.hex}"
     assert row["created_by"] == "legacy@example.com"
     assert version["authored_by"] == "legacy@example.com"
@@ -803,10 +805,7 @@ for row in bind.execute(
     )
 ).mappings():
     bind.execute(
-        sa.text(
-            "UPDATE thesis SET thesis_key=:key, created_by=:author "
-            "WHERE thesis_id=:thesis_id"
-        ),
+        sa.text("UPDATE thesis SET thesis_key=:key, created_by=:author WHERE thesis_id=:thesis_id"),
         {
             "key": f"legacy_{str(row['thesis_id']).replace('-', '').lower()}",
             "author": row["approver"] or "legacy_import",
@@ -1081,6 +1080,7 @@ def create(
     valid_from: datetime | None = None,
 ) -> CreatedThesis: ...
 
+
 def append_version(
     self,
     thesis_key: str,
@@ -1092,6 +1092,7 @@ def append_version(
     valid_from: datetime | None = None,
 ) -> ThesisVersion: ...
 
+
 def detail(
     self,
     thesis_key: str,
@@ -1100,7 +1101,10 @@ def detail(
     knowledge_time: datetime,
 ) -> ThesisDetail: ...
 
-def list_for_security(self, security_id: UUID, *, include_archived: bool = False) -> tuple[Thesis, ...]: ...
+
+def list_for_security(
+    self, security_id: UUID, *, include_archived: bool = False
+) -> tuple[Thesis, ...]: ...
 def history(self, thesis_key: str) -> tuple[ThesisVersion, ...]: ...
 def require_reference(self, thesis_key: str, security_id: UUID) -> Thesis: ...
 def archive(self, thesis_key: str, *, archived_by: str) -> Thesis: ...
@@ -1377,17 +1381,11 @@ def _validate_thesis_reference(
     if thesis is None:
         raise DomainValidationError(f"unknown thesis key {thesis_key!r}")
     if thesis.security_id != security.security_id:
-        raise DomainValidationError(
-            f"thesis key {thesis_key!r} belongs to another security"
-        )
+        raise DomainValidationError(f"thesis key {thesis_key!r} belongs to another security")
     if thesis.created_at > as_of:
-        raise DomainValidationError(
-            f"thesis key {thesis_key!r} was not known at the import cutoff"
-        )
+        raise DomainValidationError(f"thesis key {thesis_key!r} was not known at the import cutoff")
     if thesis.archived_at is not None and thesis.archived_at <= as_of:
-        raise DomainValidationError(
-            f"thesis key {thesis_key!r} was archived at the import cutoff"
-        )
+        raise DomainValidationError(f"thesis key {thesis_key!r} was archived at the import cutoff")
 ```
 
 Call it from both holdings and coverage loops with their normalized `at`
@@ -1472,12 +1470,8 @@ at `0.75`. Assert:
 assert finding.score.component_scores["thesis_relevance"] == pytest.approx(0.75)
 assert finding.thesis_version_id == assessment.thesis_version_id
 assert finding.thesis_relevance == assessment
-assert finding.score.raw_score == pytest.approx(
-    baseline.score.raw_score + 0.15 * assessment.score
-)
-assert finding.score.completeness == pytest.approx(
-    baseline.score.completeness + 0.15
-)
+assert finding.score.raw_score == pytest.approx(baseline.score.raw_score + 0.15 * assessment.score)
+assert finding.score.completeness == pytest.approx(baseline.score.completeness + 0.15)
 ```
 
 Build the card without manually supplying thesis arguments and assert exact
@@ -1736,9 +1730,7 @@ def _assess_thesis(
         knowledge_time=knowledge_time,
     )
     if selection.version is None:
-        raise ValueError(
-            f"thesis {member.thesis_id!r} is {selection.status.value} at cutoff"
-        )
+        raise ValueError(f"thesis {member.thesis_id!r} is {selection.status.value} at cutoff")
     strengths = price_signal_strengths(calculation.snapshot)
     by_name = {feature.feature_name: feature for feature in calculation.features}
     signals = tuple(

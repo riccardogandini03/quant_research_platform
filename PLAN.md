@@ -32,9 +32,9 @@ This is the product and engineering specification plus the build roadmap. It is 
 | **PLANNED** | Specified here, no code |
 | **BLOCKED** | Cannot proceed until a decision in section 0.4 or an entitlement is resolved |
 
-## 0.3 Implementation status as of 2026-08-19
+## 0.3 Implementation status as of 2026-08-24
 
-The repository contains roughly 13,700 lines of Python across `src/quant_raas`, `apps`, `workflows` and `tests`. The deterministic suite is 89 passing tests under `mypy --strict`, Ruff, and an 80% branch-coverage gate. Phase 0 and most of Phase 1 are real.
+The deterministic suite is 275 passing tests with 84% total coverage in the `--cov-branch` report, under `mypy --strict`, Ruff, and an 80% coverage gate. Phase 0 and most of Phase 1 are real.
 
 | Area | Status | Notes |
 |---|---|---|
@@ -53,16 +53,16 @@ The repository contains roughly 13,700 lines of Python across `src/quant_raas`, 
 | Connectors: fixture, Yahoo | **BUILT** | Deterministic fixture provider; Yahoo behind an explicit opt-in extra |
 | Connectors: Bloomberg, LSEG, SEC, macro | **BOUNDARY** | Placeholders that raise rather than report false success. This is correct behavior, but it means no real vendor data exists yet |
 | AI layer (`ai/`) | **BOUNDARY** | `guardrails.py` is real (~129 lines). Synthesizer, filing diff, query agent, backtest agent, evals are stubs. No LLM provider is wired |
-| Apps | **PARTIAL** | FastAPI with 9 routes, Streamlit dashboard, worker entrypoint, CLI (`init-db`, `seed-demo`, `daily`) |
+| Apps | **PARTIAL** | FastAPI with 16 routes, Streamlit dashboard, worker entrypoint, CLI (`init-db`, `seed-demo`, `daily`) |
 | Multi-tenancy / auth | **PLANNED** | **No tenant concept exists anywhere.** `user_id` is a free-text feedback attribution field, not an isolation boundary |
-| Thesis model | **BOUNDARY** | `thesis` / `thesis_version` tables exist; `research/thesis.py` is 24 lines and excluded from coverage. `thesis_relevance_score` is a materiality input with nothing producing it |
+| Thesis model | **BUILT** | Deterministic PM-authored append-only versions, exact feature-name relevance, PIT selection, lineage, API, and dashboard workflow; semantic mapping and generated proposals remain planned |
 
 ### What this means
 
 The engine is genuinely good and the discipline is high — loud failures, no silent fallbacks, real PIT enforcement. Two things are missing, and both are structural rather than incremental:
 
 1. **There is no real data.** Every finding family beyond price/risk is blocked on a vendor connector. The quant functions were written ahead of the data that feeds them.
-2. **There is no product shell.** No tenancy, no auth, no entitlement enforcement — all of which are much cheaper to add now than after 19 tables and 1,100 lines of repositories accumulate more callers.
+2. **There is no product shell.** No tenancy, no auth, no entitlement enforcement — all of which are much cheaper to add now than after the persistence layer accumulates more callers.
 
 ## 0.4 Open decision register
 
@@ -1349,11 +1349,18 @@ Section 34 rule 10 requires AI-generated backtest specifications to be validated
 
 # 24. Thesis model
 
-**Status: BOUNDARY.** `thesis` and `thesis_version` tables exist; `research/thesis.py` is 24 lines and excluded from coverage.
+**Status: BUILT for deterministic authoring and relevance.** `thesis` and
+`thesis_version` persist PM-authored identities and immutable versions.
+`thesis_relevance_score` now carries deterministic score, impact, matched-feature,
+node, version, and method lineage into findings and cards. It uses no vendor or
+LLM dependency. AI semantic mapping and generated thesis proposals remain
+planned.
 
-This is the plan's largest unspecified dependency. `thesis_relevance_score` carries a 0.15 weight — the joint-second heaviest component in the materiality formula of section 25, behind only `estimate_change` at 0.20 — and nothing currently produces it. "Thesis impact" appears on every research card in section 26. Until this section is implemented, the materiality score runs on 85% of its intended weight and the most differentiated field on the card cannot be populated.
-
-Crucially, thesis relevance is **not blocked on any vendor**. The deterministic path in 24.2 needs only PM-authored text and features the system already computes. See section 25.2 for why that makes it the highest-leverage unblocked work in the plan.
+The 0.15 relevance component does not make price-only findings material by
+itself: the current price-only theoretical ceiling rises from 0.45 to 0.60,
+below the 0.65 `material` threshold. A missing thesis is valid and remains
+absent from completeness; explicit zero overlap is distinct, contributes the
+0.15 completeness input, and contributes zero to the score.
 
 ## 24.1 What a thesis is
 
@@ -1388,20 +1395,36 @@ invalidation:
 
 ## 24.2 How relevance is computed
 
-`thesis_relevance_score` is the mapping from a finding to the thesis nodes it touches. Deterministic first, AI-assisted only for the text-to-node mapping:
+`thesis_relevance_score` deterministically maps a finding to PM-authored thesis
+nodes through exact normalized feature names:
 
-1. **Feature overlap (deterministic).** A finding whose driving features appear in a driver's `supporting_features` or a risk's `watch_features` is relevant. This alone covers the numeric finding families and requires no LLM.
-2. **Invalidation proximity (deterministic).** How close the finding moves a stated invalidation condition to being met. A finding that crosses an invalidation threshold scores maximum relevance by construction.
-3. **Semantic mapping (AI-assisted).** For filings and news where there is no feature linkage, map the extracted statement to thesis nodes. This is a *classification* task over PM-authored text — a good AI task by section 17's standard. The model selects among existing nodes; it never creates one.
+1. **Feature overlap (BUILT).** A finding signal whose feature name appears in
+   a driver's `supporting_features` or a risk's `watch_features` is relevant.
+2. **Invalidation proximity (BUILT).** A numeric feature with the exact
+   `feature_name` is scored between its warning and breach thresholds; a breach
+   scores maximum relevance.
+3. **Semantic mapping (PLANNED).** Filings/news without feature linkage may
+   later map extracted statements to existing PM-authored nodes. No AI mapping
+   or generated thesis content is implemented.
 
-Keep 1 and 2 deterministic and auditable. They are enough to unblock materiality v1 without any LLM dependency, which matters because D3 is unresolved.
+The result stores all node contributions, matched feature snapshot IDs, selected
+version ID, and relevance method version. This is auditable deterministic
+relevance, not a semantic interpretation of text.
 
 ## 24.3 Thesis lifecycle
 
 - versioned and append-only; a card always references the version current when it was produced;
-- PM edits create a new version, never mutate the old one;
-- the system may **propose** an update in response to an invalidation trigger, but it lands only on explicit PM approval;
-- a security with no thesis is legitimate — findings then score with `thesis_relevance_score` absent, and the existing `completeness` field on `MaterialityScore` already records that honestly.
+- PM edits create a new version, never mutate the old one; archive replaces delete;
+- explicit caller-supplied `created_by`, `authored_by`, and `approved_by` are
+  unauthenticated attribution until auth lands; and
+- historical selection applies both effective and knowledge cutoffs, so future
+  approval or activation cannot enter prior research.
+
+A security with no thesis is legitimate: findings then omit
+`thesis_relevance_score`. A present, selected thesis with zero overlap is an
+explicit observed zero and records its 0.15 completeness input. A future system
+may propose an update after invalidation, but generated proposals are planned
+and must never silently alter PM-authored content.
 
 That last point matters for adoption. Requiring a PM to author 100 theses before the product produces anything is a non-starter. The product must be useful with zero theses and get sharper as they are added.
 
@@ -1734,7 +1757,7 @@ quant-raas/
 │   ├── research/                  BUILT except thesis
 │   │   ├── findings.py  materiality.py  cards.py
 │   │   ├── evidence.py  reports.py  ids.py
-│   │   └── thesis.py              BOUNDARY — see section 24
+│   │   └── thesis.py              BUILT deterministic PIT relevance — see section 24
 │   │
 │   ├── ai/                        BOUNDARY except guardrails
 │   │   ├── guardrails.py          BUILT
@@ -1754,8 +1777,8 @@ quant-raas/
 ├── docs/                          BUILT (architecture, data_contracts,
 │                                        product_scope, vendor_entitlements,
 │                                        wireframes)
-├── tests/                         89 passing
-│   ├── unit/  integration/  point_in_time/
+├── tests/                         275 passing; 84% total coverage in `--cov-branch` report
+│   ├── unit/  integration/  point_in_time/  includes thesis authoring/relevance coverage
 │   └── backtest/  ai_evals/       PLANNED — directories not yet created
 │
 └── aapl_quant_research.py         legacy prototype; migration input only
@@ -1818,7 +1841,8 @@ materiality_feedback
 
 # 32. API surface
 
-**Status: PARTIAL.** Nine routes exist under `/v1`, with no authentication and no tenant scoping.
+**Status: PARTIAL.** Existing routes and six thesis routes exist under `/v1`,
+with no authentication and no tenant scoping.
 
 ## 32.1 Existing
 
@@ -1831,6 +1855,12 @@ POST /v1/holdings/validate        POST /v1/holdings/import
 POST /v1/research/runs
 GET  /v1/research/cards
 POST /v1/research/cards/{id}/feedback
+POST /v1/theses                              create identity and version 1
+GET  /v1/theses?security_id={security_id}    list active (or archived) identities
+GET  /v1/theses/{thesis_key}                 PIT detail by effective/knowledge cutoff
+GET  /v1/theses/{thesis_key}/versions        immutable version history
+POST /v1/theses/{thesis_key}/versions        append an approved version
+DELETE /v1/theses/{thesis_key}               archive; never delete
 ```
 
 The validate-then-import pairing is a good pattern — a PM uploading a holdings file gets errors before anything is persisted. Keep it for every future import.
@@ -1846,7 +1876,6 @@ POST /v1/screens                       create/validate a screen (§23)
 POST /v1/screens/{id}/run              evaluate live
 POST /v1/backtests                     submit a spec (§22)
 GET  /v1/backtests/{id}                status and results
-CRUD /v1/theses                        PM-authored thesis (§24)
 GET  /v1/data-quality                  freshness and conflicts (§10, §36)
 GET  /v1/lineage/{card_id}             "why did this appear?" (§36)
 ```
@@ -2069,7 +2098,7 @@ Ordered by expected damage. Each risk needs an owner and a review date.
 | R9 | **Quant modules built ahead of data** never get validated against reality | Medium — rework | Already occurring | Pull research-mode connectors forward (revised Phase 2); validate each quant module against real vendor data as it lands |
 | R10 | **LLM cost scales unexpectedly** with card volume | Medium | Medium | Instrument per-call cost from the first call (§8.4); threshold changes move this by 10x |
 | R11 | **Scheduler never chosen**, workflows stay manual | Medium — no autonomous product | Medium | Resolve D4. "Autonomous" is in the product name; a manual pipeline is not the product |
-| R12 | **Single-developer key-person risk** on a 13.7k-line codebase | Medium | Medium | The existing discipline (strict typing, high coverage, documented contracts) is the mitigation. Maintain it — it is what makes the code transferable |
+| R12 | **Single-developer key-person risk** on a growing codebase | Medium | Medium | The existing discipline (strict typing, high coverage, documented contracts) is the mitigation. Maintain it — it is what makes the code transferable |
 
 ---
 

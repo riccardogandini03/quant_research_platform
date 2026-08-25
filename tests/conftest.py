@@ -12,10 +12,27 @@ import pytest
 from sqlalchemy.orm import Session
 
 from quant_raas.config import Settings
-from quant_raas.domain.enums import BatchStatus, IdentifierScheme, SourceType
-from quant_raas.domain.research import EvidenceReference, ResearchRun
+from quant_raas.domain.enums import (
+    BatchStatus,
+    IdentifierScheme,
+    InvalidationComparator,
+    SourceType,
+    ThesisDirection,
+    ThesisRiskSeverity,
+)
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchRun,
+    Thesis,
+    ThesisContent,
+    ThesisDriver,
+    ThesisInvalidationRule,
+    ThesisRisk,
+    ThesisVersion,
+)
 from quant_raas.domain.security import Security, SecurityIdentifier
 from quant_raas.research.materiality import MaterialityConfig, MaterialityScorer
+from quant_raas.research.thesis import ThesisRelevanceConfig, ThesisRelevanceEvaluator
 from quant_raas.storage.session import create_schema, create_session_factory, create_sql_engine
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -130,6 +147,81 @@ def materiality_config() -> MaterialityConfig:
 @pytest.fixture
 def materiality_scorer(materiality_config: MaterialityConfig) -> MaterialityScorer:
     return MaterialityScorer(materiality_config)
+
+
+@pytest.fixture
+def thesis_content() -> ThesisContent:
+    return ThesisContent(
+        summary="Demand durability supports the long-term case.",
+        drivers=(
+            ThesisDriver(
+                node_id="relative_strength",
+                statement="Relative strength remains positive.",
+                supporting_features=("relative_return_sector_63d",),
+                direction=ThesisDirection.POSITIVE,
+            ),
+        ),
+        risks=(
+            ThesisRisk(
+                node_id="volume_risk",
+                statement="Distribution volume may signal weakening sponsorship.",
+                watch_features=("dollar_volume_zscore_20d",),
+                severity=ThesisRiskSeverity.MEDIUM,
+            ),
+        ),
+        invalidation_rules=(
+            ThesisInvalidationRule(
+                node_id="relative_break",
+                statement="Relative performance falls through the warning range.",
+                feature_name="relative_return_sector_63d",
+                comparator=InvalidationComparator.LESS_THAN_OR_EQUAL,
+                warning_threshold=-0.05,
+                breach_threshold=-0.20,
+                unit="decimal_return",
+            ),
+        ),
+    )
+
+
+@pytest.fixture
+def thesis(security_id: UUID) -> Thesis:
+    return Thesis(
+        thesis_id=UUID("71717171-7171-4717-8717-717171717171"),
+        thesis_key="example_core",
+        security_id=security_id,
+        title="Example core thesis",
+        created_by="pm@example.com",
+        created_at=datetime(2024, 1, 5, tzinfo=UTC),
+    )
+
+
+@pytest.fixture
+def thesis_version(thesis: Thesis, thesis_content: ThesisContent) -> ThesisVersion:
+    return ThesisVersion(
+        thesis_version_id=UUID("72727272-7272-4727-8727-727272727272"),
+        thesis_id=thesis.thesis_id,
+        version=1,
+        valid_from=datetime(2024, 1, 5, tzinfo=UTC),
+        content=thesis_content,
+        authored_by="analyst@example.com",
+        approved_by="pm@example.com",
+        created_at=datetime(2024, 1, 5, tzinfo=UTC),
+        approved_at=datetime(2024, 1, 5, tzinfo=UTC),
+    )
+
+
+@pytest.fixture
+def thesis_relevance_config() -> ThesisRelevanceConfig:
+    return ThesisRelevanceConfig.from_yaml(
+        REPOSITORY_ROOT / "configs" / "thesis" / "relevance.yaml"
+    )
+
+
+@pytest.fixture
+def thesis_relevance_evaluator(
+    thesis_relevance_config: ThesisRelevanceConfig,
+) -> ThesisRelevanceEvaluator:
+    return ThesisRelevanceEvaluator(thesis_relevance_config)
 
 
 @pytest.fixture

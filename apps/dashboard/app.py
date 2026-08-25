@@ -9,6 +9,7 @@ from uuid import UUID
 import streamlit as st
 from sqlalchemy import desc, select
 
+from apps.dashboard.thesis_panel import render_thesis_panel
 from quant_raas.config import get_settings
 from quant_raas.domain.enums import FeedbackKind
 from quant_raas.domain.research import MaterialityFeedback
@@ -123,6 +124,7 @@ with company_tab:
             st.markdown(render_card_markdown(cards[0], security_label=labels[selected]))
         else:
             st.info("No daily snapshot is available for this security.")
+        render_thesis_panel(_session_factory(), selected)
 
 with upload_tab:
     upload_kind = st.radio("Upload type", ["Coverage", "Holdings"], horizontal=True)
@@ -152,6 +154,7 @@ with upload_tab:
                 service = SecurityMasterService(
                     repos.securities,
                     repos.portfolios,
+                    repos.theses,
                     default_benchmark_identifier=settings.default_benchmark_identifier,
                     sector_benchmark_identifiers=settings.sector_benchmark_identifiers,
                 )

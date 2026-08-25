@@ -36,3 +36,15 @@ class AmbiguousIdentifierError(QuantRaasError):
 
 class RepositoryConflictError(QuantRaasError):
     """Raised when an idempotent natural key conflicts with different data."""
+
+
+class ThesisNotFoundError(QuantRaasError):
+    """Raised when a requested public thesis key does not exist."""
+
+
+class ThesisConflictError(QuantRaasError):
+    """Raised when a thesis lifecycle mutation conflicts with persisted state."""
+
+
+class ThesisReferenceError(QuantRaasError):
+    """Raised when a thesis or security reference is invalid for the requested use."""

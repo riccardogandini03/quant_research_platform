@@ -5,6 +5,14 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from quant_raas.domain import (
+    CoverageMember,
+    CoverageUploadRow,
+    HoldingUploadRow,
+    PortfolioPosition,
+)
 from quant_raas.domain.enums import IdentifierScheme
 from quant_raas.security_master.importer import (
     parse_coverage_csv,
@@ -47,8 +55,41 @@ def test_coverage_parser_preserves_peer_group_without_creating_weight() -> None:
         "identifier,thesis_id,peer_group\nEXAMPLE US,example_core,enterprise_software\n"
     )
     assert result.is_valid
+    assert result.rows[0].thesis_id == "example_core"
     assert result.rows[0].peer_group == "enterprise_software"
     assert not hasattr(result.rows[0], "weight")
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (HoldingUploadRow, {"identifier": "EXAMPLE", "weight": "0.01"}),
+        (CoverageUploadRow, {"identifier": "EXAMPLE"}),
+        (
+            PortfolioPosition,
+            {
+                "snapshot_id": "11111111-1111-4111-8111-111111111111",
+                "security_id": "22222222-2222-4222-8222-222222222222",
+                "weight": "0.01",
+                "source_identifier": "EXAMPLE",
+            },
+        ),
+        (
+            CoverageMember,
+            {
+                "coverage_list_id": "33333333-3333-4333-8333-333333333333",
+                "security_id": "22222222-2222-4222-8222-222222222222",
+                "added_at": "2024-01-10T00:00:00Z",
+                "source_identifier": "EXAMPLE",
+            },
+        ),
+    ],
+)
+def test_optional_csv_thesis_references_normalize_to_public_keys(
+    model: type[object], payload: dict[str, str]
+) -> None:
+    row = model.model_validate({**payload, "thesis_id": " Example_Core "})
+    assert row.thesis_id == "example_core"
 
 
 def test_repository_examples_follow_the_public_csv_contract() -> None:

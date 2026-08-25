@@ -40,8 +40,6 @@ def build_research_card(
     daily_return: float | None = None,
     benchmark_return: float | None = None,
     sector_return: float | None = None,
-    thesis_impact: ThesisImpact = ThesisImpact.NONE,
-    thesis_node_id: str | None = None,
 ) -> ResearchCard:
     """Merge related findings into one ranked, evidence-linked security card."""
 
@@ -64,6 +62,35 @@ def build_research_card(
     )
     if not evidence_ids:
         raise ValueError("research cards require evidence lineage")
+
+    assessments = [
+        finding.thesis_relevance for finding in selected if finding.thesis_relevance is not None
+    ]
+    thesis_version_ids = {assessment.thesis_version_id for assessment in assessments}
+    if len(thesis_version_ids) > 1:
+        raise ValueError("research card findings must share one thesis version")
+    primary_assessment = (
+        sorted(
+            assessments,
+            key=lambda item: (
+                -item.score,
+                item.primary_node_id is None,
+                item.primary_node_id or "",
+            ),
+        )[0]
+        if assessments
+        else None
+    )
+    thesis_node_ids = tuple(
+        sorted(
+            {
+                contribution.node_id
+                for assessment in assessments
+                for contribution in assessment.contributions
+                if contribution.matched_feature_names
+            }
+        )
+    )
 
     tier = max((finding.materiality_tier for finding in selected), key=_TIER_ORDER.__getitem__)
     confidence = min(
@@ -103,8 +130,16 @@ def build_research_card(
             sector_return=sector_return,
             notes=context_notes,
         ),
-        thesis_impact=thesis_impact,
-        thesis_node_id=thesis_node_id,
+        thesis_impact=(
+            primary_assessment.impact if primary_assessment is not None else ThesisImpact.NONE
+        ),
+        thesis_node_id=(
+            primary_assessment.primary_node_id if primary_assessment is not None else None
+        ),
+        thesis_version_id=(
+            primary_assessment.thesis_version_id if primary_assessment is not None else None
+        ),
+        thesis_node_ids=thesis_node_ids,
         key_risk_or_opportunity=(
             "The cause of the residual move is not yet resolved."
             if lead.category == FindingCategory.PRICE_ANOMALY
@@ -145,12 +180,18 @@ def render_card_markdown(card: ResearchCard, *, security_label: str) -> str:
         context.append(f"- Indicative daily contribution: {card.context.contribution_bps:+.1f} bps")
     context.extend(f"- {note}" for note in card.context.notes)
     context_text = "\n".join(context) or "- Not held or holdings context unavailable."
+    lineage_parts = []
+    if card.thesis_version_id is not None:
+        lineage_parts.append(f"version {str(card.thesis_version_id)[:8]}")
+    if card.thesis_node_id is not None:
+        lineage_parts.append(f"node {card.thesis_node_id}")
+    lineage_text = f" ({', '.join(lineage_parts)})" if lineage_parts else ""
     return (
         f"# {security_label} — {card.materiality_tier.value.upper()}\n\n"
         f"## Change\n\n{card.change}\n\n"
         f"## Quant evidence\n\n{evidence or '- No displayable metric.'}\n\n"
         f"## Context\n\n{context_text}\n\n"
-        f"## Thesis impact\n\n{card.thesis_impact.value.title()}\n\n"
+        f"## Thesis impact\n\n{card.thesis_impact.value.title()}{lineage_text}\n\n"
         f"## Confidence\n\n{card.confidence.value.title()}\n\n"
         f"## Next research question\n\n{card.next_research_question or 'Insufficient evidence.'}\n"
     )

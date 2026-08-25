@@ -7,6 +7,7 @@ research materiality.
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from math import isfinite
 from uuid import UUID, uuid4
@@ -17,6 +18,15 @@ from quant_raas.common.clock import UtcDatetime, utc_now
 from quant_raas.domain.base import DomainModel
 from quant_raas.domain.enums import IdentifierScheme
 from quant_raas.domain.security import SecurityReference
+
+
+def _normalize_thesis_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", normalized):
+        raise ValueError("thesis_id must be a lowercase public thesis key")
+    return normalized
 
 
 class HoldingUploadRow(DomainModel):
@@ -38,6 +48,7 @@ class HoldingUploadRow(DomainModel):
     _normalize_benchmark = field_validator("benchmark")(
         lambda value: value.upper() if value else None
     )
+    _normalize_thesis_id = field_validator("thesis_id")(_normalize_thesis_key)
 
     @field_validator("weight")
     @classmethod
@@ -76,6 +87,7 @@ class CoverageUploadRow(DomainModel):
     _normalize_benchmark = field_validator("benchmark")(
         lambda value: value.upper() if value else None
     )
+    _normalize_thesis_id = field_validator("thesis_id")(_normalize_thesis_key)
 
     def security_reference(self) -> SecurityReference:
         return SecurityReference(
@@ -114,6 +126,8 @@ class PortfolioPosition(DomainModel):
     benchmark_security_id: UUID | None = None
     source_identifier: str = Field(min_length=1, max_length=128)
 
+    _normalize_thesis_id = field_validator("thesis_id")(_normalize_thesis_key)
+
     @field_validator("weight")
     @classmethod
     def validate_position_weight(cls, value: Decimal) -> Decimal:
@@ -143,6 +157,8 @@ class CoverageMember(DomainModel):
     benchmark_security_id: UUID | None = None
     peer_group: str | None = Field(default=None, max_length=160)
     source_identifier: str = Field(min_length=1, max_length=128)
+
+    _normalize_thesis_id = field_validator("thesis_id")(_normalize_thesis_key)
 
     @model_validator(mode="after")
     def validate_membership_interval(self) -> CoverageMember:

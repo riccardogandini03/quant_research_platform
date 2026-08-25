@@ -94,7 +94,6 @@ omit = [
     "src/quant_raas/connectors/macro/*",
     "src/quant_raas/connectors/public_fallback/*",
     "src/quant_raas/connectors/sec/*",
-    "src/quant_raas/research/thesis.py",
 ]
 
 [tool.coverage.report]

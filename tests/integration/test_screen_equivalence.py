@@ -72,7 +72,12 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
     securities.add_security(second_security)
     securities.add_security(partial_security)
     securities.add_security(absent_security)
-    SqlAlchemyResearchRepository(sqlite_session).add_run(research_run)
+    second_run = research_run.model_copy(
+        update={"research_run_id": UUID(int=2), "run_key": "daily:2024-01-09:duplicate"}
+    )
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_run(second_run)
 
     cutoff = datetime(2024, 1, 9, 22, 0, tzinfo=UTC)
     effective = datetime(2024, 1, 9, 21, 0, tzinfo=UTC)
@@ -144,6 +149,24 @@ def test_one_off_and_historical_screen_paths_are_identical_at_same_cutoff(
                 effective,
                 available,
                 feature_version="price-mvp-v1",
+            ),
+            _screen_snapshot(
+                308,
+                sample_security.security_id,
+                second_run.research_run_id,
+                "residual_return_zscore_1d",
+                -2.5,
+                effective,
+                available,
+            ),
+            _screen_snapshot(
+                309,
+                sample_security.security_id,
+                second_run.research_run_id,
+                "dollar_volume_zscore_20d",
+                1.2,
+                effective,
+                available,
             ),
         ]
     )

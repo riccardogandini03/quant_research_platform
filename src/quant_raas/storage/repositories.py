@@ -6,12 +6,15 @@ transaction, allowing a CSV import or daily research run to remain atomic.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, insert, or_, select
+from sqlalchemy import Select, and_, func, insert, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from quant_raas.common.clock import ensure_utc
@@ -21,7 +24,7 @@ from quant_raas.common.errors import (
     IdentifierNotFoundError,
     RepositoryConflictError,
 )
-from quant_raas.domain.enums import BenchmarkKind, SecurityStatus
+from quant_raas.domain.enums import BenchmarkKind, SecurityStatus, ThesisStatus
 from quant_raas.domain.events import CompanyEvent
 from quant_raas.domain.market import CorporateAction, FeatureSnapshot, IngestionBatch, PriceBar
 from quant_raas.domain.portfolio import (
@@ -36,6 +39,10 @@ from quant_raas.domain.research import (
     ResearchCard,
     ResearchFinding,
     ResearchRun,
+    Thesis,
+    ThesisContent,
+    ThesisVersion,
+    ThesisVersionSelection,
 )
 from quant_raas.domain.security import (
     BenchmarkMapping,
@@ -43,6 +50,7 @@ from quant_raas.domain.security import (
     SecurityIdentifier,
     SecurityReference,
 )
+from quant_raas.research.thesis import select_thesis_version
 from quant_raas.storage.models import (
     BenchmarkMappingRecord,
     CompanyEventRecord,
@@ -61,6 +69,8 @@ from quant_raas.storage.models import (
     ResearchRunRecord,
     SecurityIdentifierRecord,
     SecurityRecord,
+    ThesisRecord,
+    ThesisVersionRecord,
     research_card_evidence,
     research_card_finding,
     research_finding_evidence,
@@ -73,6 +83,19 @@ def _enum_value(value: Any) -> Any:
 
 def _uuid_strings(values: Iterable[UUID]) -> list[str]:
     return [str(value) for value in values]
+
+
+def _is_unique_integrity_error(error: IntegrityError) -> bool:
+    original = error.orig
+    if "23505" in (
+        getattr(original, "sqlstate", None),
+        getattr(original, "pgcode", None),
+    ):
+        return True
+    return getattr(original, "sqlite_errorcode", None) in {
+        sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+        sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
+    }
 
 
 def _security_from_record(record: SecurityRecord) -> Security:
@@ -127,6 +150,48 @@ def _mapping_from_record(record: BenchmarkMappingRecord) -> BenchmarkMapping:
             "config_version": record.config_version,
             "created_at": record.created_at,
         }
+    )
+
+
+def _thesis_from_record(record: ThesisRecord) -> Thesis:
+    return Thesis.model_validate(
+        {
+            "thesis_id": record.thesis_id,
+            "thesis_key": record.thesis_key,
+            "security_id": record.security_id,
+            "title": record.title,
+            "status": record.status,
+            "created_by": record.created_by,
+            "created_at": record.created_at,
+            "archived_at": record.archived_at,
+            "archived_by": record.archived_by,
+        }
+    )
+
+
+def _thesis_version_from_record(record: ThesisVersionRecord) -> ThesisVersion:
+    return ThesisVersion.model_validate(
+        {
+            "thesis_version_id": record.thesis_version_id,
+            "thesis_id": record.thesis_id,
+            "version": record.version,
+            "valid_from": record.valid_from,
+            "valid_to": record.valid_to,
+            "content": ThesisContent.model_validate(record.nodes),
+            "authored_by": record.authored_by,
+            "approved_by": record.approved_by,
+            "approved_at": record.approved_at,
+            "created_at": record.created_at,
+        }
+    )
+
+
+def _locked_thesis_statement(thesis_id: UUID) -> Select[tuple[ThesisRecord]]:
+    return (
+        select(ThesisRecord)
+        .where(ThesisRecord.thesis_id == thesis_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -744,46 +809,60 @@ class SqlAlchemyFeatureRepository:
 
     def upsert_many(self, snapshots: Iterable[FeatureSnapshot]) -> int:
         inserted = 0
-        for snapshot in snapshots:
-            existing = self.session.scalar(
-                select(FeatureSnapshotRecord).where(
-                    FeatureSnapshotRecord.security_id == snapshot.security_id,
-                    FeatureSnapshotRecord.feature_name == snapshot.feature_name,
-                    FeatureSnapshotRecord.feature_version == snapshot.feature_version,
-                    FeatureSnapshotRecord.effective_at == snapshot.effective_at,
-                    FeatureSnapshotRecord.available_at == snapshot.available_at,
-                    FeatureSnapshotRecord.code_version == snapshot.code_version,
-                    FeatureSnapshotRecord.config_version == snapshot.config_version,
-                )
-            )
-            if existing:
-                if existing.value != snapshot.value:
-                    raise RepositoryConflictError(
-                        "feature snapshot natural key contains a different value"
+        nested = self.session.begin_nested()
+        try:
+            with nested:
+                for snapshot in snapshots:
+                    existing_by_id = self.session.get(
+                        FeatureSnapshotRecord,
+                        snapshot.feature_snapshot_id,
                     )
-                continue
-            self.session.add(
-                FeatureSnapshotRecord(
-                    feature_snapshot_id=snapshot.feature_snapshot_id,
-                    security_id=snapshot.security_id,
-                    feature_name=snapshot.feature_name,
-                    feature_version=snapshot.feature_version,
-                    effective_at=snapshot.effective_at,
-                    available_at=snapshot.available_at,
-                    calculated_at=snapshot.calculated_at,
-                    value=snapshot.model_dump(mode="json")["value"],
-                    unit=snapshot.unit,
-                    window=snapshot.window,
-                    quality_flags=[flag.value for flag in snapshot.quality_flags],
-                    input_evidence_ids=_uuid_strings(snapshot.input_evidence_ids),
-                    research_run_id=snapshot.research_run_id,
-                    code_version=snapshot.code_version,
-                    config_version=snapshot.config_version,
-                    metadata_json=snapshot.model_dump(mode="json")["metadata"],
-                )
-            )
-            inserted += 1
-        self.session.flush()
+                    existing_by_natural_key = self.session.scalar(
+                        select(FeatureSnapshotRecord).where(
+                            FeatureSnapshotRecord.security_id == snapshot.security_id,
+                            FeatureSnapshotRecord.feature_name == snapshot.feature_name,
+                            FeatureSnapshotRecord.feature_version == snapshot.feature_version,
+                            FeatureSnapshotRecord.effective_at == snapshot.effective_at,
+                            FeatureSnapshotRecord.available_at == snapshot.available_at,
+                            FeatureSnapshotRecord.code_version == snapshot.code_version,
+                            FeatureSnapshotRecord.config_version == snapshot.config_version,
+                            FeatureSnapshotRecord.research_run_id == snapshot.research_run_id,
+                        )
+                    )
+                    existing_records = {
+                        record.feature_snapshot_id: record
+                        for record in (existing_by_id, existing_by_natural_key)
+                        if record is not None
+                    }
+                    for existing in existing_records.values():
+                        if _feature_persisted_payload(existing) == _feature_persisted_payload(
+                            snapshot
+                        ):
+                            continue
+                        if (
+                            existing is existing_by_natural_key
+                            and existing.feature_snapshot_id != snapshot.feature_snapshot_id
+                        ):
+                            raise RepositoryConflictError(
+                                "feature snapshot natural key contains a different "
+                                "feature_snapshot_id"
+                            )
+                        raise RepositoryConflictError(
+                            "feature snapshot identity or natural key contains a different "
+                            "persisted payload"
+                        )
+                    if existing_records:
+                        continue
+                    record = _feature_record(snapshot)
+                    self.session.add(record)
+                    self.session.flush((record,))
+                    inserted += 1
+        except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
+            raise RepositoryConflictError(
+                "feature snapshot identity or natural key already exists"
+            ) from error
         return inserted
 
     def latest_as_of(
@@ -810,11 +889,23 @@ class SqlAlchemyFeatureRepository:
                 FeatureSnapshotRecord.effective_at.desc(),
                 FeatureSnapshotRecord.available_at.desc(),
                 FeatureSnapshotRecord.calculated_at.desc(),
+                FeatureSnapshotRecord.feature_snapshot_id,
+                FeatureSnapshotRecord.research_run_id,
             )
         )
         latest: dict[str, FeatureSnapshotRecord] = {}
         for row in self.session.scalars(statement):
-            latest.setdefault(row.feature_name, row)
+            selected = latest.get(row.feature_name)
+            if selected is None:
+                latest[row.feature_name] = row
+                continue
+            if _feature_precedence(row) != _feature_precedence(selected):
+                continue
+            if not _feature_semantically_equal(row, selected):
+                raise RepositoryConflictError(
+                    f"ambiguous latest feature vintage for security {row.security_id} "
+                    f"feature {row.feature_name!r}"
+                )
         return tuple(_feature_from_record(row) for row in latest.values())
 
     def panel_as_of(
@@ -880,6 +971,7 @@ class SqlAlchemyFeatureRepository:
                 FeatureSnapshotRecord.security_id,
                 FeatureSnapshotRecord.feature_name,
                 FeatureSnapshotRecord.feature_snapshot_id,
+                FeatureSnapshotRecord.research_run_id,
             )
         )
         latest: dict[tuple[UUID, str], FeatureSnapshotRecord] = {}
@@ -889,13 +981,9 @@ class SqlAlchemyFeatureRepository:
             if selected is None:
                 latest[key] = row
                 continue
-            precedence = (row.effective_at, row.available_at, row.calculated_at)
-            selected_precedence = (
-                selected.effective_at,
-                selected.available_at,
-                selected.calculated_at,
-            )
-            if precedence == selected_precedence:
+            if _feature_precedence(row) == _feature_precedence(
+                selected
+            ) and not _feature_semantically_equal(row, selected):
                 raise RepositoryConflictError(
                     f"ambiguous latest feature vintage for security {row.security_id} "
                     f"feature {row.feature_name!r}"
@@ -904,6 +992,70 @@ class SqlAlchemyFeatureRepository:
             _feature_from_record(latest[key])
             for key in sorted(latest, key=lambda item: (str(item[0]), item[1]))
         )
+
+
+def _feature_precedence(row: FeatureSnapshotRecord) -> tuple[Any, Any, Any]:
+    return (row.effective_at, row.available_at, row.calculated_at)
+
+
+def _feature_record(snapshot: FeatureSnapshot) -> FeatureSnapshotRecord:
+    payload = snapshot.model_dump(mode="json")
+    return FeatureSnapshotRecord(
+        feature_snapshot_id=snapshot.feature_snapshot_id,
+        security_id=snapshot.security_id,
+        feature_name=snapshot.feature_name,
+        feature_version=snapshot.feature_version,
+        effective_at=snapshot.effective_at,
+        available_at=snapshot.available_at,
+        calculated_at=snapshot.calculated_at,
+        value=payload["value"],
+        unit=snapshot.unit,
+        window=snapshot.window,
+        quality_flags=payload["quality_flags"],
+        input_evidence_ids=payload["input_evidence_ids"],
+        research_run_id=snapshot.research_run_id,
+        code_version=snapshot.code_version,
+        config_version=snapshot.config_version,
+        metadata_json=payload["metadata"],
+    )
+
+
+def _feature_persisted_payload(
+    feature: FeatureSnapshot | FeatureSnapshotRecord,
+    *,
+    include_identity: bool = True,
+) -> str:
+    snapshot = (
+        _feature_from_record(feature) if isinstance(feature, FeatureSnapshotRecord) else feature
+    )
+    payload = snapshot.model_dump(mode="json")
+    if not include_identity:
+        payload.pop("feature_snapshot_id")
+        payload.pop("research_run_id")
+    return _canonical_json_payload(payload)
+
+
+def _canonical_json_payload(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _feature_semantically_equal(
+    left: FeatureSnapshotRecord,
+    right: FeatureSnapshotRecord,
+) -> bool:
+    return _feature_persisted_payload(
+        left,
+        include_identity=False,
+    ) == _feature_persisted_payload(
+        right,
+        include_identity=False,
+    )
 
 
 def _feature_from_record(row: FeatureSnapshotRecord) -> FeatureSnapshot:
@@ -929,18 +1081,210 @@ def _feature_from_record(row: FeatureSnapshotRecord) -> FeatureSnapshot:
     )
 
 
+class SqlAlchemyThesisRepository:
+    """Append-only thesis persistence with caller-owned transactions."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add_thesis(self, thesis: Thesis) -> Thesis:
+        existing = self.session.scalar(
+            select(ThesisRecord).where(ThesisRecord.thesis_key == thesis.thesis_key)
+        )
+        if existing is not None:
+            raise RepositoryConflictError(f"thesis key {thesis.thesis_key!r} already exists")
+        record = ThesisRecord(
+            thesis_id=thesis.thesis_id,
+            thesis_key=thesis.thesis_key,
+            security_id=thesis.security_id,
+            title=thesis.title,
+            status=thesis.status.value,
+            created_by=thesis.created_by,
+            created_at=thesis.created_at,
+            archived_at=thesis.archived_at,
+            archived_by=thesis.archived_by,
+        )
+        self.session.add(record)
+        try:
+            self.session.flush((record,))
+        except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
+            raise RepositoryConflictError(
+                f"thesis key {thesis.thesis_key!r} already exists"
+            ) from error
+        return _thesis_from_record(record)
+
+    def get_by_id(self, thesis_id: UUID) -> Thesis | None:
+        record = self.session.get(ThesisRecord, thesis_id)
+        return _thesis_from_record(record) if record is not None else None
+
+    def get_by_key(self, thesis_key: str) -> Thesis | None:
+        record = self.session.scalar(
+            select(ThesisRecord).where(ThesisRecord.thesis_key == thesis_key)
+        )
+        return _thesis_from_record(record) if record is not None else None
+
+    def list_for_security(
+        self,
+        security_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> Sequence[Thesis]:
+        statement = select(ThesisRecord).where(ThesisRecord.security_id == security_id)
+        if not include_archived:
+            statement = statement.where(ThesisRecord.status == ThesisStatus.ACTIVE.value)
+        statement = statement.order_by(ThesisRecord.thesis_key, ThesisRecord.thesis_id)
+        return tuple(_thesis_from_record(row) for row in self.session.scalars(statement))
+
+    def add_version(
+        self,
+        version: ThesisVersion,
+        *,
+        expected_version: int,
+    ) -> ThesisVersion:
+        thesis = self.session.scalar(_locked_thesis_statement(version.thesis_id))
+        if thesis is None:
+            raise RepositoryConflictError(f"thesis {version.thesis_id} does not exist")
+        if thesis.status == ThesisStatus.ARCHIVED.value:
+            raise RepositoryConflictError("cannot append a version to an archived thesis")
+
+        latest_version = int(
+            self.session.scalar(
+                select(func.coalesce(func.max(ThesisVersionRecord.version), 0)).where(
+                    ThesisVersionRecord.thesis_id == version.thesis_id
+                )
+            )
+            or 0
+        )
+        if latest_version != expected_version:
+            raise RepositoryConflictError(
+                f"expected version {expected_version}, but latest version is {latest_version}"
+            )
+        next_version = expected_version + 1
+        if version.version != next_version:
+            raise RepositoryConflictError(f"next thesis version must be {next_version}")
+
+        latest = self.session.scalar(
+            select(ThesisVersionRecord)
+            .where(ThesisVersionRecord.thesis_id == version.thesis_id)
+            .order_by(
+                ThesisVersionRecord.version.desc(),
+                ThesisVersionRecord.approved_at.desc(),
+                ThesisVersionRecord.thesis_version_id.desc(),
+            )
+        )
+        if latest is not None and version.valid_from < latest.valid_from:
+            raise RepositoryConflictError(
+                "new thesis version valid_from cannot precede the latest activation"
+            )
+
+        record = ThesisVersionRecord(
+            thesis_version_id=version.thesis_version_id,
+            thesis_id=version.thesis_id,
+            version=version.version,
+            valid_from=version.valid_from,
+            valid_to=version.valid_to,
+            nodes=version.content.model_dump(mode="json"),
+            authored_by=version.authored_by,
+            approved_by=version.approved_by,
+            approved_at=version.approved_at,
+            created_at=version.created_at,
+        )
+        self.session.add(record)
+        try:
+            self.session.flush((record,))
+        except IntegrityError as error:
+            if not _is_unique_integrity_error(error):
+                raise
+            raise RepositoryConflictError(
+                f"thesis {version.thesis_id} version {version.version} already exists"
+            ) from error
+        return _thesis_version_from_record(record)
+
+    def list_versions(self, thesis_id: UUID) -> Sequence[ThesisVersion]:
+        statement = (
+            select(ThesisVersionRecord)
+            .where(ThesisVersionRecord.thesis_id == thesis_id)
+            .order_by(
+                ThesisVersionRecord.version,
+                ThesisVersionRecord.approved_at,
+                ThesisVersionRecord.thesis_version_id,
+            )
+        )
+        return tuple(_thesis_version_from_record(row) for row in self.session.scalars(statement))
+
+    def version_as_of(
+        self,
+        thesis: Thesis,
+        *,
+        effective_at: datetime,
+        knowledge_time: datetime,
+    ) -> ThesisVersionSelection:
+        return select_thesis_version(
+            thesis,
+            self.list_versions(thesis.thesis_id),
+            effective_at=effective_at,
+            knowledge_time=knowledge_time,
+        )
+
+    def archive(
+        self,
+        thesis_id: UUID,
+        *,
+        archived_at: datetime,
+        archived_by: str,
+    ) -> Thesis:
+        record = self.session.scalar(_locked_thesis_statement(thesis_id))
+        if record is None:
+            raise RepositoryConflictError(f"thesis {thesis_id} does not exist")
+        if record.status == ThesisStatus.ARCHIVED.value:
+            return _thesis_from_record(record)
+
+        archived = Thesis.model_validate(
+            {
+                "thesis_id": record.thesis_id,
+                "thesis_key": record.thesis_key,
+                "security_id": record.security_id,
+                "title": record.title,
+                "status": ThesisStatus.ARCHIVED,
+                "created_by": record.created_by,
+                "created_at": record.created_at,
+                "archived_at": ensure_utc(archived_at),
+                "archived_by": archived_by,
+            }
+        )
+        record.status = archived.status.value
+        record.archived_at = archived.archived_at
+        record.archived_by = archived.archived_by
+        self.session.flush((record,))
+        return _thesis_from_record(record)
+
+
 class SqlAlchemyResearchRepository:
     """Research persistence with referential evidence links."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def add_run(self, run: ResearchRun) -> ResearchRun:
-        existing = self.session.scalar(
-            select(ResearchRunRecord).where(ResearchRunRecord.run_key == run.run_key)
+    def run_by_key(self, run_key: str) -> ResearchRun | None:
+        record = self.session.scalar(
+            select(ResearchRunRecord).where(ResearchRunRecord.run_key == run_key)
         )
-        if existing:
-            return _run_from_record(existing)
+        return _run_from_record(record) if record is not None else None
+
+    def add_run(self, run: ResearchRun) -> ResearchRun:
+        existing = self.run_by_key(run.run_key)
+        if existing is not None:
+            if existing.research_run_id != run.research_run_id:
+                raise RepositoryConflictError(
+                    "research run key contains a different research_run_id"
+                )
+            if existing != run:
+                raise RepositoryConflictError(
+                    "research run key contains a different persisted payload"
+                )
+            return existing
         self.session.add(
             ResearchRunRecord(
                 research_run_id=run.research_run_id,
@@ -996,7 +1340,12 @@ class SqlAlchemyResearchRepository:
             )
         )
         if existing:
-            return _finding_from_record(existing)
+            persisted = _finding_from_record(existing)
+            if persisted != finding:
+                raise RepositoryConflictError(
+                    f"finding key {finding.finding_key!r} contains a different persisted payload"
+                )
+            return persisted
         payload = finding.model_dump(mode="json")
         self.session.add(
             ResearchFindingRecord(
@@ -1018,6 +1367,8 @@ class SqlAlchemyResearchRepository:
                 materiality_tier=finding.materiality_tier.value,
                 confidence=finding.confidence.value,
                 portfolio_weight=finding.portfolio_weight,
+                thesis_version_id=finding.thesis_version_id,
+                thesis_relevance=payload["thesis_relevance"],
                 metadata_json=payload["metadata"],
             )
         )
@@ -1035,7 +1386,12 @@ class SqlAlchemyResearchRepository:
             select(ResearchCardRecord).where(ResearchCardRecord.card_key == card.card_key)
         )
         if existing:
-            return _card_from_record(existing)
+            persisted = _card_from_record(existing)
+            if persisted != card:
+                raise RepositoryConflictError(
+                    f"card key {card.card_key!r} contains a different persisted payload"
+                )
+            return persisted
         payload = card.model_dump(mode="json")
         self.session.add(
             ResearchCardRecord(
@@ -1051,6 +1407,8 @@ class SqlAlchemyResearchRepository:
                 context=payload["context"],
                 thesis_impact=card.thesis_impact.value,
                 thesis_node_id=card.thesis_node_id,
+                thesis_version_id=card.thesis_version_id,
+                thesis_node_ids=list(card.thesis_node_ids),
                 key_risk_or_opportunity=card.key_risk_or_opportunity,
                 confidence=card.confidence.value,
                 next_research_question=card.next_research_question,
@@ -1175,6 +1533,8 @@ def _finding_from_record(row: ResearchFindingRecord) -> ResearchFinding:
             "materiality_tier": row.materiality_tier,
             "confidence": row.confidence,
             "portfolio_weight": row.portfolio_weight,
+            "thesis_version_id": row.thesis_version_id,
+            "thesis_relevance": row.thesis_relevance,
             "metadata": row.metadata_json,
         }
     )
@@ -1195,6 +1555,8 @@ def _card_from_record(row: ResearchCardRecord) -> ResearchCard:
             "context": row.context,
             "thesis_impact": row.thesis_impact,
             "thesis_node_id": row.thesis_node_id,
+            "thesis_version_id": row.thesis_version_id,
+            "thesis_node_ids": row.thesis_node_ids or [],
             "key_risk_or_opportunity": row.key_risk_or_opportunity,
             "confidence": row.confidence,
             "next_research_question": row.next_research_question,

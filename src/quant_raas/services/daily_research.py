@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import math
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import isfinite
 from uuid import UUID
 
 import pandas as pd
 
 from quant_raas.common.clock import ensure_utc, utc_now
+from quant_raas.common.errors import QuantRaasError, RepositoryConflictError
 from quant_raas.domain.enums import BatchStatus, BenchmarkKind
 from quant_raas.domain.market import FeatureSnapshot, PriceBar
 from quant_raas.domain.portfolio import CoverageMember
@@ -21,17 +23,30 @@ from quant_raas.domain.protocols import (
     PortfolioRepository,
     ResearchRepository,
     SecurityRepository,
+    ThesisRepository,
 )
-from quant_raas.domain.research import EvidenceReference, ResearchCard, ResearchFinding, ResearchRun
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchCard,
+    ResearchFinding,
+    ResearchRun,
+    ThesisRelevanceAssessment,
+    ThesisSignal,
+)
 from quant_raas.quant.anomalies import fit_abnormal_return_model, volume_zscore
 from quant_raas.quant.factors import rolling_beta
 from quant_raas.quant.returns import relative_return, rolling_total_return, simple_returns
 from quant_raas.quant.risk import rolling_volatility
 from quant_raas.research.cards import build_research_card
 from quant_raas.research.evidence import price_bar_evidence
-from quant_raas.research.findings import PriceResearchSnapshot, build_price_finding
+from quant_raas.research.findings import (
+    PriceResearchSnapshot,
+    build_price_finding,
+    price_signal_strengths,
+)
 from quant_raas.research.ids import stable_research_id
 from quant_raas.research.materiality import MaterialityScorer
+from quant_raas.research.thesis import ThesisRelevanceEvaluator
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,16 +105,20 @@ class DailyResearchService:
         portfolios: PortfolioRepository,
         market_data: MarketDataRepository,
         features: FeatureRepository,
+        theses: ThesisRepository,
         research: ResearchRepository,
         materiality: MaterialityScorer,
+        thesis_relevance: ThesisRelevanceEvaluator,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.securities = securities
         self.portfolios = portfolios
         self.market_data = market_data
         self.feature_repository = features
+        self.thesis_repository = theses
         self.research_repository = research
         self.materiality = materiality
+        self.thesis_relevance = thesis_relevance
         self.clock = clock
 
     def run(
@@ -133,13 +152,43 @@ class DailyResearchService:
         )
         by_security = _group_bars(bars)
         batch_ids = tuple(sorted({bar.ingestion_batch_id for bar in bars}, key=str))
-        run_key = _run_key(request, batch_ids)
-        run_id = stable_research_id("run", run_key)
-        started_at = max(ensure_utc(self.clock()), cutoff)
-
-        calculations: list[tuple[CoverageMember, _SecurityCalculation]] = []
-        failures: list[SecurityResearchFailure] = []
+        thesis_method_version = self.thesis_relevance.config.method_version
+        materiality_score_version = self.materiality.config.score_version
         weights = dict(position_weights or {})
+        run_key = _run_key(
+            request,
+            batch_ids,
+            thesis_method_version=thesis_method_version,
+            materiality_score_version=materiality_score_version,
+            position_weights=position_weights,
+            covered_security_ids=tuple(member.security_id for member in members),
+        )
+        run_id = stable_research_id("run", run_key)
+        run_config_version = _run_config_version(
+            request.feature_config_version,
+            thesis_method_version,
+            materiality_score_version,
+        )
+        existing_run = self.research_repository.run_by_key(run_key)
+        if existing_run is None:
+            started_at = max(ensure_utc(self.clock()), cutoff)
+        else:
+            _validate_reusable_run(
+                existing_run,
+                research_run_id=run_id,
+                run_key=run_key,
+                as_of=as_of,
+                data_cutoff_at=cutoff,
+                code_version=request.code_version,
+                config_version=run_config_version,
+                ingestion_batch_ids=batch_ids,
+            )
+            started_at = existing_run.started_at
+
+        calculations: list[
+            tuple[CoverageMember, _SecurityCalculation, ThesisRelevanceAssessment | None]
+        ] = []
+        failures: list[SecurityResearchFailure] = []
         for member in members:
             try:
                 calculation = self._calculate_security(
@@ -151,20 +200,27 @@ class DailyResearchService:
                     code_version=request.code_version,
                     config_version=request.feature_config_version,
                 )
-                calculations.append((member, calculation))
-            except (ValueError, ArithmeticError) as error:
+                assessment = self._assess_thesis(
+                    member,
+                    calculation,
+                    effective_at=as_of,
+                    knowledge_time=cutoff,
+                )
+                calculations.append((member, calculation, assessment))
+            except (QuantRaasError, ValueError, ArithmeticError) as error:
                 failures.append(SecurityResearchFailure(member.security_id, str(error)))
 
         findings: list[ResearchFinding] = []
         cards: list[ResearchCard] = []
         feature_snapshots: list[FeatureSnapshot] = []
         evidence_by_id: dict[UUID, EvidenceReference] = {}
-        for member, calculation in calculations:
+        for member, calculation, assessment in calculations:
             finding = build_price_finding(
                 calculation.snapshot,
                 research_run_id=run_id,
                 scorer=self.materiality,
                 position_weight=weights.get(member.security_id),
+                thesis_assessment=assessment,
             )
             card = build_research_card(
                 [finding],
@@ -183,7 +239,11 @@ class DailyResearchService:
             feature_snapshots.extend(calculation.features)
             evidence_by_id.update({item.evidence_id: item for item in calculation.evidence})
 
-        completed_at = max(ensure_utc(self.clock()), started_at)
+        completed_at = (
+            max(ensure_utc(self.clock()), started_at)
+            if existing_run is None
+            else existing_run.completed_at
+        )
         status = (
             BatchStatus.FAILED
             if not cards
@@ -200,7 +260,7 @@ class DailyResearchService:
             completed_at=completed_at,
             status=status,
             code_version=request.code_version,
-            config_version=request.feature_config_version,
+            config_version=run_config_version,
             ingestion_batch_ids=batch_ids,
             error_message=(
                 "; ".join(f"{failure.security_id}: {failure.message}" for failure in failures)[
@@ -248,6 +308,48 @@ class DailyResearchService:
                 ),
             }
         return result
+
+    def _assess_thesis(
+        self,
+        member: CoverageMember,
+        calculation: _SecurityCalculation,
+        *,
+        effective_at: datetime,
+        knowledge_time: datetime,
+    ) -> ThesisRelevanceAssessment | None:
+        if member.thesis_id is None:
+            return None
+        thesis = self.thesis_repository.get_by_key(member.thesis_id)
+        if thesis is None or thesis.security_id != member.security_id:
+            raise ValueError(f"invalid thesis reference {member.thesis_id!r}")
+        selection = self.thesis_repository.version_as_of(
+            thesis,
+            effective_at=effective_at,
+            knowledge_time=knowledge_time,
+        )
+        if selection.version is None:
+            raise ValueError(f"thesis {member.thesis_id!r} is {selection.status.value} at cutoff")
+        strengths = price_signal_strengths(calculation.snapshot)
+        by_name = {feature.feature_name: feature for feature in calculation.features}
+        signals = tuple(
+            ThesisSignal(
+                feature_name=name,
+                raw_value=float(by_name[name].value),
+                normalized_strength=strength,
+                feature_snapshot_id=by_name[name].feature_snapshot_id,
+                unit=by_name[name].unit,
+            )
+            for name, strength in sorted(strengths.items())
+            if name in by_name
+            and isinstance(by_name[name].value, (int, float))
+            and not isinstance(by_name[name].value, bool)
+            and isfinite(float(by_name[name].value))
+        )
+        return self.thesis_relevance.assess(
+            selection.version,
+            signals=signals,
+            features=calculation.features,
+        )
 
     def _calculate_security(
         self,
@@ -421,19 +523,93 @@ class DailyResearchService:
         )
 
 
-def _run_key(request: DailyResearchRequest, batch_ids: tuple[UUID, ...]) -> str:
-    payload = "|".join(
+def _validate_reusable_run(
+    existing: ResearchRun,
+    *,
+    research_run_id: UUID,
+    run_key: str,
+    as_of: datetime,
+    data_cutoff_at: datetime,
+    code_version: str,
+    config_version: str,
+    ingestion_batch_ids: tuple[UUID, ...],
+) -> None:
+    expected_fields: tuple[tuple[str, object], ...] = (
+        ("research_run_id", research_run_id),
+        ("run_key", run_key),
+        ("run_type", "daily"),
+        ("as_of", as_of),
+        ("data_cutoff_at", data_cutoff_at),
+        ("code_version", code_version),
+        ("config_version", config_version),
+        ("ingestion_batch_ids", ingestion_batch_ids),
+    )
+    for field, expected in expected_fields:
+        if getattr(existing, field) != expected:
+            raise RepositoryConflictError(f"research run key contains a different {field}")
+    if existing.completed_at is None:
+        raise RepositoryConflictError("research run key identifies an incomplete persisted run")
+
+
+def _run_key(
+    request: DailyResearchRequest,
+    batch_ids: tuple[UUID, ...],
+    *,
+    thesis_method_version: str,
+    materiality_score_version: str,
+    position_weights: Mapping[UUID, float] | None,
+    covered_security_ids: Sequence[UUID],
+) -> str:
+    effective_position_weights = _canonical_position_weights(
+        position_weights,
+        covered_security_ids,
+    )
+    payload = _canonical_json(
         [
             str(request.coverage_list_id),
             ensure_utc(request.as_of).isoformat(),
             ensure_utc(request.data_cutoff_at).isoformat(),
+            request.lookback_calendar_days,
             request.source,
             request.code_version,
             request.feature_config_version,
-            *(str(value) for value in batch_ids),
+            thesis_method_version,
+            materiality_score_version,
+            effective_position_weights,
+            [str(value) for value in batch_ids],
         ]
     )
-    return f"daily:{hashlib.sha256(payload.encode()).hexdigest()}"
+    return f"daily:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _run_config_version(
+    feature_config_version: str,
+    thesis_method_version: str,
+    materiality_score_version: str,
+) -> str:
+    payload = _canonical_json(
+        [feature_config_version, thesis_method_version, materiality_score_version]
+    )
+    return f"bundle:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _canonical_position_weights(
+    position_weights: Mapping[UUID, float] | None,
+    covered_security_ids: Sequence[UUID],
+) -> dict[str, float]:
+    if position_weights is None:
+        return {}
+    return {
+        str(security_id): (
+            0.0 if position_weights[security_id] == 0.0 else float(position_weights[security_id])
+        )
+        for security_id in sorted(set(covered_security_ids), key=str)
+        if security_id in position_weights
+    }
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _group_bars(bars: Sequence[PriceBar]) -> dict[UUID, tuple[PriceBar, ...]]:
@@ -471,15 +647,13 @@ def _last_finite(values: pd.Series) -> float | None:
     if values.empty:
         return None
     value = values.iloc[-1]
-    return float(value) if pd.notna(value) and math.isfinite(float(value)) else None
+    return float(value) if pd.notna(value) and isfinite(float(value)) else None
 
 
 def _last_at(values: pd.Series, index: object) -> float | None:
     value = values.get(index)
     return (
-        float(value)
-        if value is not None and pd.notna(value) and math.isfinite(float(value))
-        else None
+        float(value) if value is not None and pd.notna(value) and isfinite(float(value)) else None
     )
 
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from math import isfinite
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import Field, field_validator, model_validator
@@ -15,9 +17,13 @@ from quant_raas.domain.enums import (
     ConfidenceLevel,
     FeedbackKind,
     FindingCategory,
+    InvalidationComparator,
     MaterialityTier,
     SourceType,
+    ThesisDirection,
     ThesisImpact,
+    ThesisRiskSeverity,
+    ThesisSelectionStatus,
     ThesisStatus,
 )
 
@@ -137,6 +143,8 @@ class ResearchFinding(DomainModel):
     materiality_tier: MaterialityTier
     confidence: ConfidenceLevel
     portfolio_weight: float | None = None
+    thesis_version_id: UUID | None = None
+    thesis_relevance: ThesisRelevanceAssessment | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -144,6 +152,11 @@ class ResearchFinding(DomainModel):
         # Upcoming earnings can generate a valid risk finding before event time.
         if self.available_at > self.created_at:
             raise ValueError("available_at cannot be later than created_at")
+        if self.thesis_relevance is None:
+            if self.thesis_version_id is not None:
+                raise ValueError("thesis_version_id requires thesis_relevance")
+        elif self.thesis_version_id != self.thesis_relevance.thesis_version_id:
+            raise ValueError("thesis relevance and thesis_version_id must match")
         return self
 
 
@@ -174,6 +187,8 @@ class ResearchCard(DomainModel):
     context: CardContext = Field(default_factory=CardContext)
     thesis_impact: ThesisImpact = ThesisImpact.NONE
     thesis_node_id: str | None = Field(default=None, max_length=128)
+    thesis_version_id: UUID | None = None
+    thesis_node_ids: tuple[str, ...] = ()
     key_risk_or_opportunity: str | None = Field(default=None, max_length=1000)
     confidence: ConfidenceLevel
     next_research_question: str | None = Field(default=None, max_length=1000)
@@ -188,6 +203,134 @@ class ResearchCard(DomainModel):
     def validate_card_timing(self) -> ResearchCard:
         if self.as_of > self.data_cutoff_at or self.data_cutoff_at > self.created_at:
             raise ValueError("card timing must satisfy as_of <= data_cutoff_at <= created_at")
+        if self.thesis_node_ids != tuple(sorted(set(self.thesis_node_ids))):
+            raise ValueError("thesis_node_ids must be sorted and unique")
+        if self.thesis_node_id is not None and self.thesis_node_id not in self.thesis_node_ids:
+            raise ValueError("primary thesis node must belong to thesis_node_ids")
+        if self.thesis_version_id is None and (
+            self.thesis_node_id is not None or self.thesis_node_ids
+        ):
+            raise ValueError("thesis nodes require thesis_version_id")
+        if self.thesis_impact is not ThesisImpact.NONE and (
+            self.thesis_version_id is None or self.thesis_node_id is None
+        ):
+            raise ValueError("non-NONE thesis impact requires a thesis version and primary node")
+        return self
+
+
+_KEY_PATTERN = r"^[a-z][a-z0-9_]{0,127}$"
+_FEATURE_PATTERN = r"^[a-z][a-z0-9_]{0,159}$"
+
+
+def _normalize_feature_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("feature names must be strings")
+    normalized = value.strip().lower()
+    if not re.fullmatch(_FEATURE_PATTERN, normalized):
+        raise ValueError("feature names must be canonical feature names")
+    return normalized
+
+
+def _normalize_feature_names(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        values = (value,)
+    else:
+        if not isinstance(value, Iterable):
+            raise ValueError("feature names must be a sequence")
+        values = tuple(value)
+    return tuple(dict.fromkeys(_normalize_feature_name(item) for item in values))
+
+
+class ThesisDriver(DomainModel):
+    """A typed, auditable positive, negative, or mixed thesis driver."""
+
+    node_id: str = Field(pattern=_KEY_PATTERN)
+    statement: str = Field(min_length=1, max_length=2000)
+    supporting_features: tuple[str, ...] = ()
+    direction: ThesisDirection
+
+    _normalize_supporting_features = field_validator("supporting_features", mode="before")(
+        _normalize_feature_names
+    )
+
+
+class ThesisRisk(DomainModel):
+    """A typed risk node monitored through exact feature names."""
+
+    node_id: str = Field(pattern=_KEY_PATTERN)
+    statement: str = Field(min_length=1, max_length=2000)
+    watch_features: tuple[str, ...] = ()
+    severity: ThesisRiskSeverity
+
+    _normalize_watch_features = field_validator("watch_features", mode="before")(
+        _normalize_feature_names
+    )
+
+
+class ThesisInvalidationRule(DomainModel):
+    """A threshold-based, deterministic thesis invalidation rule."""
+
+    node_id: str = Field(pattern=_KEY_PATTERN)
+    statement: str = Field(min_length=1, max_length=2000)
+    feature_name: str = Field(pattern=_FEATURE_PATTERN)
+    comparator: InvalidationComparator
+    warning_threshold: float
+    breach_threshold: float
+    unit: str | None = Field(default=None, max_length=40)
+
+    _normalize_feature_name = field_validator("feature_name", mode="before")(
+        _normalize_feature_name
+    )
+
+    @field_validator("warning_threshold", "breach_threshold")
+    @classmethod
+    def validate_finite_threshold(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("thresholds must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self) -> ThesisInvalidationRule:
+        if (
+            self.comparator is InvalidationComparator.GREATER_THAN_OR_EQUAL
+            and self.breach_threshold <= self.warning_threshold
+        ):
+            raise ValueError("breach threshold must be above warning threshold")
+        if (
+            self.comparator is InvalidationComparator.LESS_THAN_OR_EQUAL
+            and self.breach_threshold >= self.warning_threshold
+        ):
+            raise ValueError("breach threshold must be below warning threshold")
+        return self
+
+
+class ThesisContent(DomainModel):
+    """Versioned PM-authored content with a strict, stable schema."""
+
+    schema_version: Literal[1] = 1
+    summary: str = Field(min_length=1, max_length=5000)
+    drivers: tuple[ThesisDriver, ...] = ()
+    risks: tuple[ThesisRisk, ...] = ()
+    invalidation_rules: tuple[ThesisInvalidationRule, ...] = ()
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version(cls, value: object) -> int:
+        if type(value) is int and value == 1:
+            return value
+        raise ValueError("schema_version must be the integer 1")
+
+    @model_validator(mode="after")
+    def validate_unique_node_ids(self) -> ThesisContent:
+        node_ids = (
+            *(node.node_id for node in self.drivers),
+            *(node.node_id for node in self.risks),
+            *(node.node_id for node in self.invalidation_rules),
+        )
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("node IDs must be unique across thesis content")
         return self
 
 
@@ -195,10 +338,25 @@ class Thesis(DomainModel):
     """Stable identity for a PM-owned investment thesis."""
 
     thesis_id: UUID = Field(default_factory=uuid4)
+    thesis_key: str = Field(pattern=_KEY_PATTERN)
     security_id: UUID
     title: str = Field(min_length=1, max_length=300)
     status: ThesisStatus = ThesisStatus.ACTIVE
+    created_by: str = Field(min_length=1, max_length=160)
     created_at: UtcDatetime = Field(default_factory=utc_now)
+    archived_at: UtcDatetime | None = None
+    archived_by: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_archive_state(self) -> Thesis:
+        if self.status is ThesisStatus.ARCHIVED:
+            if self.archived_at is None or self.archived_by is None:
+                raise ValueError("archived theses require archived_at and archived_by")
+            if self.archived_at < self.created_at:
+                raise ValueError("archived_at cannot precede created_at")
+        elif self.archived_at is not None or self.archived_by is not None:
+            raise ValueError("active theses cannot have archive fields")
+        return self
 
 
 class ThesisVersion(DomainModel):
@@ -209,7 +367,8 @@ class ThesisVersion(DomainModel):
     version: int = Field(ge=1)
     valid_from: UtcDatetime
     valid_to: UtcDatetime | None = None
-    nodes: dict[str, Any] = Field(default_factory=dict)
+    content: ThesisContent
+    authored_by: str = Field(min_length=1, max_length=160)
     approved_by: str = Field(min_length=1, max_length=160)
     approved_at: UtcDatetime
     created_at: UtcDatetime = Field(default_factory=utc_now)
@@ -218,9 +377,124 @@ class ThesisVersion(DomainModel):
     def validate_thesis_version(self) -> ThesisVersion:
         if self.valid_to is not None and self.valid_to <= self.valid_from:
             raise ValueError("valid_to must be later than valid_from")
-        if self.approved_at > self.created_at:
-            raise ValueError("approved_at cannot be later than created_at")
+        if self.created_at > self.approved_at:
+            raise ValueError("approved_at cannot precede created_at")
         return self
+
+
+class ThesisSignal(DomainModel):
+    """One finite, point-in-time feature value available to thesis evaluation."""
+
+    feature_name: str = Field(pattern=_FEATURE_PATTERN)
+    raw_value: float
+    normalized_strength: float = Field(ge=0.0, le=1.0)
+    feature_snapshot_id: UUID
+    direction: str | None = Field(default=None, max_length=40)
+    unit: str | None = Field(default=None, max_length=40)
+
+    _normalize_feature_name = field_validator("feature_name", mode="before")(
+        _normalize_feature_name
+    )
+
+    @field_validator("raw_value")
+    @classmethod
+    def validate_raw_value(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("raw values must be finite")
+        return value
+
+
+class ThesisNodeContribution(DomainModel):
+    """Traceable relevance result for one typed thesis node."""
+
+    node_id: str = Field(pattern=_KEY_PATTERN)
+    node_kind: Literal["driver", "risk", "invalidation_rule"]
+    score: float | None = Field(default=None, ge=0.0, le=1.0)
+    matched_feature_names: tuple[str, ...] = ()
+    feature_snapshot_ids: tuple[UUID, ...] = ()
+    unevaluated_reason: str | None = Field(default=None, min_length=1, max_length=80)
+
+    _normalize_matched_feature_names = field_validator("matched_feature_names", mode="before")(
+        _normalize_feature_names
+    )
+
+    @model_validator(mode="after")
+    def validate_contribution_lineage(self) -> ThesisNodeContribution:
+        if len(self.matched_feature_names) != len(self.feature_snapshot_ids):
+            raise ValueError("matched feature names and feature snapshot ids must be aligned")
+        if self.score is None and self.unevaluated_reason is None:
+            raise ValueError("unevaluated contributions require unevaluated_reason")
+        if self.score is not None and self.unevaluated_reason is not None:
+            raise ValueError("scored contributions cannot have unevaluated_reason")
+        return self
+
+
+class ThesisRelevanceAssessment(DomainModel):
+    """Immutable output and lineage of deterministic thesis relevance evaluation."""
+
+    thesis_id: UUID
+    thesis_version_id: UUID
+    score: float = Field(ge=0.0, le=1.0)
+    impact: ThesisImpact
+    primary_node_id: str | None = Field(default=None, pattern=_KEY_PATTERN)
+    contributions: tuple[ThesisNodeContribution, ...] = ()
+    method_version: str = Field(min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_assessment_lineage(self) -> ThesisRelevanceAssessment:
+        node_ids = tuple(contribution.node_id for contribution in self.contributions)
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("contribution node IDs must be unique")
+
+        evaluated_scores = tuple(
+            contribution.score
+            for contribution in self.contributions
+            if contribution.score is not None
+        )
+        expected_score = max(evaluated_scores, default=0.0)
+        if self.score != expected_score:
+            raise ValueError("assessment score must equal the maximum evaluable contribution")
+
+        matched = tuple(
+            contribution
+            for contribution in self.contributions
+            if contribution.score is not None and contribution.matched_feature_names
+        )
+        if not matched:
+            if self.primary_node_id is not None:
+                raise ValueError(
+                    "primary_node_id must be None when no contribution matched a feature"
+                )
+            return self
+
+        primary = min(
+            matched,
+            key=lambda contribution: (-(contribution.score or 0.0), contribution.node_id),
+        )
+        if self.primary_node_id != primary.node_id:
+            raise ValueError("primary_node_id must be the deterministic matched contributor")
+        return self
+
+
+class ThesisVersionSelection(DomainModel):
+    """Point-in-time thesis version selection with an explicit outcome."""
+
+    thesis_id: UUID
+    effective_at: UtcDatetime
+    knowledge_time: UtcDatetime
+    status: ThesisSelectionStatus
+    version: ThesisVersion | None = None
+
+    @model_validator(mode="after")
+    def validate_selection_lineage(self) -> ThesisVersionSelection:
+        if (self.status is ThesisSelectionStatus.SELECTED) != (self.version is not None):
+            raise ValueError("status must be SELECTED if and only if version is present")
+        if self.version is not None and self.version.thesis_id != self.thesis_id:
+            raise ValueError("selected version belongs to thesis_id only when identities match")
+        return self
+
+
+ResearchFinding.model_rebuild()
 
 
 class MaterialityFeedback(DomainModel):

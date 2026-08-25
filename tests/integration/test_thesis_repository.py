@@ -1,0 +1,586 @@
+"""Integration coverage for immutable, versioned thesis persistence."""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from quant_raas.common.errors import RepositoryConflictError
+from quant_raas.config import Settings
+from quant_raas.domain.enums import ThesisImpact, ThesisSelectionStatus, ThesisStatus
+from quant_raas.domain.research import (
+    EvidenceReference,
+    ResearchRun,
+    Thesis,
+    ThesisContent,
+    ThesisNodeContribution,
+    ThesisRelevanceAssessment,
+    ThesisVersion,
+)
+from quant_raas.domain.security import Security
+from quant_raas.research.cards import build_research_card
+from quant_raas.research.findings import PriceResearchSnapshot, build_price_finding
+from quant_raas.research.materiality import MaterialityScorer
+from quant_raas.storage.models import ThesisVersionRecord
+from quant_raas.storage.repositories import (
+    SqlAlchemyResearchRepository,
+    SqlAlchemySecurityRepository,
+    SqlAlchemyThesisRepository,
+)
+from quant_raas.storage.session import create_schema, create_session_factory, create_sql_engine
+
+SECOND_THESIS_ID = UUID("73737373-7373-4737-8737-737373737373")
+SECOND_VERSION_ID = UUID("74747474-7474-4747-8747-747474747474")
+ARCHIVED_AT = datetime(2024, 1, 12, tzinfo=UTC)
+
+
+class _CodedIntegrityCause(Exception):
+    def __init__(
+        self,
+        *,
+        sqlite_errorcode: int | None = None,
+        sqlstate: str | None = None,
+        pgcode: str | None = None,
+    ) -> None:
+        super().__init__("constraint failure")
+        self.sqlite_errorcode = sqlite_errorcode
+        self.sqlstate = sqlstate
+        self.pgcode = pgcode
+
+
+def _persist_security(session: Session, security: Security) -> None:
+    SqlAlchemySecurityRepository(session).add_security(security)
+
+
+def _second_version(
+    thesis: Thesis,
+    content: ThesisContent,
+    *,
+    version: int = 2,
+    valid_from: datetime = datetime(2024, 1, 6, tzinfo=UTC),
+    approved_at: datetime = datetime(2024, 1, 6, tzinfo=UTC),
+) -> ThesisVersion:
+    return ThesisVersion(
+        thesis_version_id=SECOND_VERSION_ID,
+        thesis_id=thesis.thesis_id,
+        version=version,
+        valid_from=valid_from,
+        content=content,
+        authored_by="analyst@example.com",
+        approved_by="pm@example.com",
+        created_at=approved_at,
+        approved_at=approved_at,
+    )
+
+
+def test_repository_round_trips_identity_content_and_point_in_time_selection(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+
+    assert repository.add_thesis(thesis) == thesis
+    assert repository.add_version(thesis_version, expected_version=0) == thesis_version
+
+    by_id = repository.get_by_id(thesis.thesis_id)
+    by_key = repository.get_by_key("example_core")
+    assert by_id == by_key == thesis
+    assert repository.list_for_security(sample_security.security_id) == (thesis,)
+    assert repository.list_versions(thesis.thesis_id) == (thesis_version,)
+    stored = sqlite_session.get(ThesisVersionRecord, thesis_version.thesis_version_id)
+    assert stored is not None
+    assert stored.nodes == thesis_version.content.model_dump(mode="json")
+
+    selection = repository.version_as_of(
+        thesis,
+        effective_at=thesis_version.valid_from,
+        knowledge_time=thesis_version.approved_at,
+    )
+    assert selection.version == thesis_version
+
+
+def test_duplicate_public_key_raises_the_exact_repository_conflict(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    duplicate = thesis.model_copy(update={"thesis_id": SECOND_THESIS_ID})
+
+    with pytest.raises(
+        RepositoryConflictError,
+        match=r"thesis key 'example_core' already exists",
+    ):
+        repository.add_thesis(duplicate)
+
+
+def test_missing_security_foreign_key_integrity_error_is_not_mislabeled(
+    sqlite_session: Session,
+    thesis: Thesis,
+) -> None:
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+
+    with pytest.raises(IntegrityError) as raised:
+        repository.add_thesis(thesis)
+
+    assert not isinstance(raised.value, RepositoryConflictError)
+    assert raised.value.orig.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+
+
+def test_identity_listing_is_stable_and_excludes_archived_by_default(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    later_key = thesis.model_copy(update={"thesis_id": SECOND_THESIS_ID, "thesis_key": "zeta_case"})
+    repository.add_thesis(later_key)
+    repository.add_thesis(thesis)
+    archived = repository.archive(
+        thesis.thesis_id,
+        archived_at=ARCHIVED_AT,
+        archived_by="archive@example.com",
+    )
+
+    assert repository.list_for_security(sample_security.security_id) == (later_key,)
+    assert repository.list_for_security(
+        sample_security.security_id,
+        include_archived=True,
+    ) == (archived, later_key)
+
+
+def test_append_requires_current_expected_version_and_exact_next_number(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    thesis_content: ThesisContent,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+
+    with pytest.raises(RepositoryConflictError, match=r"expected version 0.*latest version is 1"):
+        repository.add_version(_second_version(thesis, thesis_content), expected_version=0)
+    with pytest.raises(RepositoryConflictError, match="next thesis version must be 2"):
+        repository.add_version(
+            _second_version(thesis, thesis_content, version=3),
+            expected_version=1,
+        )
+
+
+def test_append_requires_monotonic_activation_time(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    thesis_content: ThesisContent,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+    earlier = _second_version(
+        thesis,
+        thesis_content,
+        valid_from=thesis_version.valid_from - timedelta(seconds=1),
+    )
+
+    with pytest.raises(RepositoryConflictError, match="valid_from cannot precede"):
+        repository.add_version(earlier, expected_version=1)
+
+
+def test_version_history_is_stably_ordered_by_version_then_approval(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    thesis_content: ThesisContent,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+    second = _second_version(
+        thesis,
+        thesis_content,
+        approved_at=thesis_version.approved_at - timedelta(days=1),
+    )
+    repository.add_version(second, expected_version=1)
+
+    assert repository.list_versions(thesis.thesis_id) == (thesis_version, second)
+
+
+def test_archive_is_idempotent_and_point_in_time_aware(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+
+    first = repository.archive(
+        thesis.thesis_id,
+        archived_at=ARCHIVED_AT,
+        archived_by="first@example.com",
+    )
+    repeated = repository.archive(
+        thesis.thesis_id,
+        archived_at=ARCHIVED_AT + timedelta(days=1),
+        archived_by="second@example.com",
+    )
+
+    assert repeated == first
+    assert repeated.status is ThesisStatus.ARCHIVED
+    assert repeated.archived_at == ARCHIVED_AT
+    assert repeated.archived_by == "first@example.com"
+    before = repository.version_as_of(
+        repeated,
+        effective_at=thesis_version.valid_from,
+        knowledge_time=ARCHIVED_AT - timedelta(microseconds=1),
+    )
+    at_archive = repository.version_as_of(
+        repeated,
+        effective_at=thesis_version.valid_from,
+        knowledge_time=ARCHIVED_AT,
+    )
+    assert before.version == thesis_version
+    assert at_archive.status is ThesisSelectionStatus.ARCHIVED_AT_CUTOFF
+    assert at_archive.version is None
+
+
+def test_archived_identity_rejects_new_versions(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    thesis_content: ThesisContent,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+    repository.archive(
+        thesis.thesis_id,
+        archived_at=ARCHIVED_AT,
+        archived_by="archive@example.com",
+    )
+
+    with pytest.raises(RepositoryConflictError, match="archived thesis"):
+        repository.add_version(_second_version(thesis, thesis_content), expected_version=1)
+
+
+def test_malformed_legacy_content_fails_closed_without_rewriting_json(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    malformed_nodes: dict[str, object] = {}
+    sqlite_session.add(
+        ThesisVersionRecord(
+            thesis_version_id=thesis_version.thesis_version_id,
+            thesis_id=thesis.thesis_id,
+            version=1,
+            valid_from=thesis_version.valid_from,
+            valid_to=None,
+            nodes=malformed_nodes,
+            authored_by=thesis_version.authored_by,
+            approved_by=thesis_version.approved_by,
+            approved_at=thesis_version.approved_at,
+            created_at=thesis_version.created_at,
+        )
+    )
+    sqlite_session.commit()
+
+    with pytest.raises(ValidationError):
+        repository.list_versions(thesis.thesis_id)
+
+    stored = sqlite_session.get(ThesisVersionRecord, thesis_version.thesis_version_id)
+    assert stored is not None
+    assert stored.nodes == malformed_nodes
+
+
+def test_repository_mutations_leave_commit_and_rollback_to_the_caller(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    sqlite_session.commit()
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+
+    repository.add_thesis(thesis)
+    repository.add_version(thesis_version, expected_version=0)
+    sqlite_session.rollback()
+
+    assert repository.get_by_id(thesis.thesis_id) is None
+
+
+def test_archive_leaves_rollback_to_the_caller(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    repository.add_thesis(thesis)
+    sqlite_session.commit()
+
+    repository.archive(
+        thesis.thesis_id,
+        archived_at=ARCHIVED_AT,
+        archived_by="archive@example.com",
+    )
+    sqlite_session.rollback()
+    sqlite_session.expire_all()
+
+    assert repository.get_by_id(thesis.thesis_id) == thesis
+
+
+@pytest.mark.parametrize("operation", ["identity", "version"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_UNIQUE),
+            id="sqlite-unique",
+        ),
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY),
+            id="sqlite-primary-key",
+        ),
+        pytest.param(_CodedIntegrityCause(sqlstate="23505"), id="postgres-sqlstate"),
+        pytest.param(_CodedIntegrityCause(pgcode="23505"), id="postgres-legacy-pgcode"),
+    ],
+)
+def test_unique_flush_races_are_translated_with_integrity_error_as_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    operation: str,
+    cause: Exception,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    if operation == "version":
+        repository.add_thesis(thesis)
+    simulated_race = IntegrityError("INSERT", {}, cause)
+    original_flush: Callable[..., None] = sqlite_session.flush
+
+    def fail_pending_unique_flush(*args: object, **kwargs: object) -> None:
+        if sqlite_session.new:
+            raise simulated_race
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", fail_pending_unique_flush)
+
+    with pytest.raises(RepositoryConflictError) as raised:
+        if operation == "identity":
+            repository.add_thesis(thesis)
+        else:
+            repository.add_version(thesis_version, expected_version=0)
+
+    assert raised.value.__cause__ is simulated_race
+
+
+@pytest.mark.parametrize("operation", ["identity", "version"])
+@pytest.mark.parametrize(
+    "cause",
+    [
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_NOTNULL),
+            id="sqlite-not-null",
+        ),
+        pytest.param(
+            _CodedIntegrityCause(sqlite_errorcode=sqlite3.SQLITE_CONSTRAINT_CHECK),
+            id="sqlite-check",
+        ),
+        pytest.param(_CodedIntegrityCause(sqlstate="23503"), id="postgres-foreign-key"),
+        pytest.param(_CodedIntegrityCause(), id="unknown"),
+    ],
+)
+def test_unrelated_integrity_flush_failures_are_re_raised_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    operation: str,
+    cause: Exception,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    repository = SqlAlchemyThesisRepository(sqlite_session)
+    if operation == "version":
+        repository.add_thesis(thesis)
+    simulated_failure = IntegrityError("INSERT", {}, cause)
+    original_flush: Callable[..., None] = sqlite_session.flush
+
+    def fail_pending_integrity_flush(*args: object, **kwargs: object) -> None:
+        if sqlite_session.new:
+            raise simulated_failure
+        original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_session, "flush", fail_pending_integrity_flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        if operation == "identity":
+            repository.add_thesis(thesis)
+        else:
+            repository.add_version(thesis_version, expected_version=0)
+
+    assert raised.value is simulated_failure
+
+
+def test_locked_refresh_rejects_stale_append_after_concurrent_archive(
+    tmp_path: Path,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    thesis_content: ThesisContent,
+) -> None:
+    database_path = tmp_path / "thesis-concurrency.sqlite3"
+    settings = Settings(
+        environment="test",
+        database_url=f"sqlite+pysqlite:///{database_path.as_posix()}",
+        database_echo=False,
+    )
+    engine = create_sql_engine(settings)
+    create_schema(engine)
+    factory = create_session_factory(engine)
+    session_a = factory()
+    session_b = factory()
+    try:
+        _persist_security(session_a, sample_security)
+        repository_a = SqlAlchemyThesisRepository(session_a)
+        repository_a.add_thesis(thesis)
+        repository_a.add_version(thesis_version, expected_version=0)
+        session_a.commit()
+        assert repository_a.get_by_id(thesis.thesis_id) == thesis
+
+        repository_b = SqlAlchemyThesisRepository(session_b)
+        archived = repository_b.archive(
+            thesis.thesis_id,
+            archived_at=ARCHIVED_AT,
+            archived_by="first@example.com",
+        )
+        session_b.commit()
+        repeated = repository_b.archive(
+            thesis.thesis_id,
+            archived_at=ARCHIVED_AT + timedelta(days=1),
+            archived_by="second@example.com",
+        )
+        session_b.commit()
+        assert repeated == archived
+
+        with pytest.raises(RepositoryConflictError, match="archived thesis"):
+            repository_a.add_version(
+                _second_version(thesis, thesis_content),
+                expected_version=1,
+            )
+    finally:
+        session_a.close()
+        session_b.close()
+        engine.dispose()
+
+
+def test_thesis_version_delete_is_restricted_by_persisted_research_lineage(
+    sqlite_session: Session,
+    sample_security: Security,
+    thesis: Thesis,
+    thesis_version: ThesisVersion,
+    research_run: ResearchRun,
+    evidence_reference: EvidenceReference,
+    materiality_scorer: MaterialityScorer,
+) -> None:
+    _persist_security(sqlite_session, sample_security)
+    theses = SqlAlchemyThesisRepository(sqlite_session)
+    theses.add_thesis(thesis)
+    theses.add_version(thesis_version, expected_version=0)
+    research = SqlAlchemyResearchRepository(sqlite_session)
+    research.add_run(research_run)
+    research.add_evidence(evidence_reference)
+    assessment = ThesisRelevanceAssessment(
+        thesis_id=thesis.thesis_id,
+        thesis_version_id=thesis_version.thesis_version_id,
+        score=0.75,
+        impact=ThesisImpact.HIGH,
+        primary_node_id="volume_risk",
+        contributions=(
+            ThesisNodeContribution(
+                node_id="volume_risk",
+                node_kind="risk",
+                score=0.75,
+                matched_feature_names=("dollar_volume_zscore_20d",),
+                feature_snapshot_ids=(UUID("82828282-8282-4828-8828-828282828282"),),
+            ),
+        ),
+        method_version="thesis-relevance-v1",
+    )
+    finding = build_price_finding(
+        PriceResearchSnapshot(
+            security_id=sample_security.security_id,
+            as_of=research_run.as_of,
+            available_at=evidence_reference.available_at,
+            created_at=research_run.started_at,
+            daily_return=-0.04,
+            residual_return=-0.03,
+            residual_zscore=-3.0,
+            volume_zscore=2.0,
+            realized_volatility_20d=0.30,
+            beta_126d=1.2,
+            relative_return_sector_63d=-0.10,
+            observations=252,
+            evidence_ids=(evidence_reference.evidence_id,),
+        ),
+        research_run_id=research_run.research_run_id,
+        scorer=materiality_scorer,
+        thesis_assessment=assessment,
+    )
+    research.add_finding(finding)
+    research.add_card(
+        build_research_card(
+            [finding],
+            research_run_id=research_run.research_run_id,
+            security_id=sample_security.security_id,
+            as_of=research_run.as_of,
+            data_cutoff_at=research_run.data_cutoff_at,
+            created_at=research_run.started_at,
+        )
+    )
+    sqlite_session.flush()
+
+    stored_version = sqlite_session.get(ThesisVersionRecord, thesis_version.thesis_version_id)
+    assert stored_version is not None
+    sqlite_session.delete(stored_version)
+    with pytest.raises(IntegrityError) as raised:
+        sqlite_session.flush()
+
+    assert raised.value.orig.sqlite_errorcode in {
+        sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
+        sqlite3.SQLITE_CONSTRAINT_TRIGGER,
+    }

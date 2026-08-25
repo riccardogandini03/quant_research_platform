@@ -8,16 +8,18 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from quant_raas.common.clock import UtcDatetime
 from quant_raas.domain.enums import (
     FeedbackKind,
     IdentifierScheme,
     SecurityStatus,
     SecurityType,
 )
+from quant_raas.domain.research import ThesisContent
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class IdentifierRegistration(ApiModel):
@@ -69,3 +71,26 @@ class FeedbackRequest(ApiModel):
     feedback: FeedbackKind
     user_id: str | None = None
     comment: str | None = None
+
+
+class ThesisCreateRequest(ApiModel):
+    thesis_key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    security_id: UUID
+    title: str = Field(min_length=1, max_length=300)
+    content: ThesisContent
+    created_by: str = Field(min_length=1, max_length=160)
+    authored_by: str = Field(min_length=1, max_length=160)
+    approved_by: str = Field(min_length=1, max_length=160)
+    valid_from: UtcDatetime | None = None
+
+
+class ThesisVersionRequest(ApiModel):
+    content: ThesisContent
+    authored_by: str = Field(min_length=1, max_length=160)
+    approved_by: str = Field(min_length=1, max_length=160)
+    expected_version: int = Field(ge=1)
+    valid_from: UtcDatetime | None = None
+
+
+class ThesisArchiveRequest(ApiModel):
+    archived_by: str = Field(min_length=1, max_length=160)

@@ -8,7 +8,7 @@ from datetime import datetime
 from uuid import UUID
 
 from quant_raas.common.clock import ensure_utc, utc_now
-from quant_raas.common.errors import QuantRaasError
+from quant_raas.common.errors import DomainValidationError, QuantRaasError
 from quant_raas.domain.enums import BenchmarkKind
 from quant_raas.domain.portfolio import (
     CoverageList,
@@ -18,7 +18,7 @@ from quant_raas.domain.portfolio import (
     PortfolioPosition,
     PortfolioSnapshot,
 )
-from quant_raas.domain.protocols import PortfolioRepository, SecurityRepository
+from quant_raas.domain.protocols import PortfolioRepository, SecurityRepository, ThesisRepository
 from quant_raas.domain.security import (
     BenchmarkMapping,
     Security,
@@ -75,12 +75,14 @@ class SecurityMasterService:
         self,
         security_repository: SecurityRepository,
         portfolio_repository: PortfolioRepository,
+        thesis_repository: ThesisRepository | None = None,
         *,
         default_benchmark_identifier: str | None = None,
         sector_benchmark_identifiers: Mapping[str, str] | None = None,
     ) -> None:
         self.securities = security_repository
         self.portfolios = portfolio_repository
+        self.theses = thesis_repository
         self.default_benchmark_identifier = default_benchmark_identifier
         self.sector_benchmarks = dict(sector_benchmark_identifiers or {})
 
@@ -191,6 +193,7 @@ class SecurityMasterService:
         for row_number, row in enumerate(rows, start=2):
             try:
                 security = self.resolve(row.security_reference(), as_of=at)
+                self._validate_thesis_reference(row.thesis_id, security, as_of=at)
                 benchmark_id = self._resolve_benchmark(row.benchmark, security, as_of=at)
                 resolved.append((row, security, benchmark_id))
             except QuantRaasError as exc:
@@ -235,6 +238,7 @@ class SecurityMasterService:
         for row_number, row in enumerate(rows, start=2):
             try:
                 security = self.resolve(row.security_reference(), as_of=at)
+                self._validate_thesis_reference(row.thesis_id, security, as_of=at)
                 benchmark_id = self._resolve_benchmark(row.benchmark, security, as_of=at)
                 resolved.append((row, security, benchmark_id))
             except QuantRaasError as exc:
@@ -259,6 +263,31 @@ class SecurityMasterService:
         )
         self.portfolios.add_coverage_members(members)
         return CoverageImportResult(coverage, members, ())
+
+    def _validate_thesis_reference(
+        self,
+        thesis_key: str | None,
+        security: Security,
+        *,
+        as_of: datetime,
+    ) -> None:
+        if thesis_key is None:
+            return
+        if self.theses is None:
+            raise DomainValidationError("thesis reference validation is unavailable")
+        thesis = self.theses.get_by_key(thesis_key)
+        if thesis is None:
+            raise DomainValidationError(f"unknown thesis key {thesis_key!r}")
+        if thesis.security_id != security.security_id:
+            raise DomainValidationError(f"thesis key {thesis_key!r} belongs to another security")
+        if thesis.created_at > as_of:
+            raise DomainValidationError(
+                f"thesis key {thesis_key!r} was not known at the import cutoff"
+            )
+        if thesis.archived_at is not None and thesis.archived_at <= as_of:
+            raise DomainValidationError(
+                f"thesis key {thesis_key!r} was archived at the import cutoff"
+            )
 
     def _resolve_benchmark(
         self,
