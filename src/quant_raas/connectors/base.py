@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid5
 
+from quant_raas.domain.enums import DataUsageMode
 from quant_raas.domain.market import PriceBarRequest
 
 CONNECTOR_NAMESPACE = UUID("54192fef-f838-4d89-bbaa-785e8b700499")
@@ -23,6 +25,12 @@ class ProviderNotConfigured(ProviderError):
 
 class ProviderDataError(ProviderError):
     """Raised when a provider response violates the expected data contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class BatchIdentity:
+    batch_id: UUID
+    batch_key: str
 
 
 def request_payload(request: PriceBarRequest) -> dict[str, Any]:
@@ -43,17 +51,50 @@ def fingerprint_request(request: PriceBarRequest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def stable_batch_id(provider: str, request: PriceBarRequest) -> UUID:
-    """Make provider retries of the same logical request idempotent."""
+def content_addressed_batch_identity(
+    *,
+    provider: str,
+    dataset: str,
+    request_fingerprint: str,
+    field_map_version: str,
+    usage_mode: DataUsageMode,
+    content_hash: str,
+) -> BatchIdentity:
+    """Derive deterministic batch lineage from every stable attempt dimension."""
 
-    return uuid5(CONNECTOR_NAMESPACE, f"{provider}:{fingerprint_request(request)}")
-
-
-def batch_key(provider: str, request: PriceBarRequest) -> str:
-    return f"{provider}:daily:{fingerprint_request(request)[:24]}"
+    payload = json.dumps(
+        {
+            "provider": provider,
+            "dataset": dataset,
+            "request_fingerprint": request_fingerprint,
+            "field_map_version": field_map_version,
+            "usage_mode": usage_mode.value,
+            "content_hash": content_hash,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return BatchIdentity(
+        batch_id=uuid5(CONNECTOR_NAMESPACE, digest),
+        batch_key=f"{provider}:{digest[:40]}",
+    )
 
 
 def require_utc(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
-    return value
+    return value.astimezone(UTC)
+
+
+def acquisition_started_at(
+    request: PriceBarRequest,
+    observed_at: datetime,
+) -> datetime:
+    """Validate the provider clock without copying a future request timestamp."""
+
+    acquired_at = require_utc(observed_at, field_name="acquisition clock")
+    if request.requested_at > acquired_at:
+        raise ProviderDataError("request timestamp cannot be later than the acquisition clock")
+    return acquired_at

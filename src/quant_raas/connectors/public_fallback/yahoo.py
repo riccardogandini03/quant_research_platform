@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import pandas as pd
@@ -13,14 +11,25 @@ import pandas as pd
 from quant_raas.common.clock import utc_now
 from quant_raas.connectors.base import (
     ProviderDataError,
+    ProviderError,
     ProviderNotConfigured,
-    batch_key,
-    fingerprint_request,
-    stable_batch_id,
+    acquisition_started_at,
+    require_utc,
 )
-from quant_raas.domain.enums import BatchStatus, DataQualityFlag, DataUsageMode
-from quant_raas.domain.market import IngestionBatch, PriceBar, PriceBarRequest, PriceIngestionResult
+from quant_raas.domain.enums import DataQualityFlag, DataUsageMode, PriceFailureCategory
+from quant_raas.domain.market import (
+    PriceBarRequest,
+    PriceIngestionResult,
+    PriceItemFailure,
+)
 from quant_raas.normalization.price_bars import normalize_price_frame
+from quant_raas.normalization.price_content import (
+    NormalizedPriceRow,
+    build_price_ingestion_result,
+    date_key_effective_at,
+)
+
+YAHOO_PRICE_FIELD_MAP_VERSION = "yahoo_daily_price_v1"
 
 
 class YahooFinancePriceProvider:
@@ -57,10 +66,9 @@ class YahooFinancePriceProvider:
                 "Install the 'public-data' extra to enable the Yahoo fallback"
             ) from error
 
-        started_at = max(self._clock(), request.requested_at)
-        batch_id = stable_batch_id(self.name, request)
-        bars: list[PriceBar] = []
-        failures: list[str] = []
+        started_at = acquisition_started_at(request, self._clock())
+        rows: list[NormalizedPriceRow] = []
+        failures: list[PriceItemFailure] = []
         for item in request.items:
             try:
                 raw = yf.download(
@@ -73,62 +81,38 @@ class YahooFinancePriceProvider:
                     progress=False,
                     threads=False,
                 )
-                bars.extend(
+            except Exception:
+                raise ProviderError("Yahoo price request failed") from None
+            try:
+                if raw.empty:
+                    failures.append(_no_data_failure(item.provider_identifier))
+                    continue
+                rows.extend(
                     self._normalize_item(
                         raw,
                         security_id=item.security_id,
                         provider_identifier=item.provider_identifier,
-                        batch_id=batch_id,
-                        ingested_at=started_at,
                     )
                 )
-            except Exception as error:  # Provider schemas and HTTP failures vary.
-                failures.append(f"{item.provider_identifier}: {type(error).__name__}: {error}")
+            except Exception:
+                raise ProviderDataError("Yahoo response failed daily-price validation") from None
 
-        completed_at = max(self._clock(), started_at)
-        if failures and not bars:
-            status = BatchStatus.FAILED
-        elif failures:
-            status = BatchStatus.PARTIAL
-        else:
-            status = BatchStatus.SUCCEEDED
-        fingerprint = fingerprint_request(request)
-        content = json.dumps(
-            [
-                {
-                    "id": bar.source_record_id,
-                    "available_at": bar.available_at.isoformat(),
-                    "ohlcv": [
-                        bar.open,
-                        bar.high,
-                        bar.low,
-                        bar.close,
-                        bar.adjusted_close,
-                        bar.volume,
-                    ],
-                }
-                for bar in sorted(bars, key=lambda value: value.source_record_id)
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        batch = IngestionBatch(
-            batch_id=batch_id,
-            batch_key=batch_key(self.name, request),
+        completed_at = max(
+            require_utc(self._clock(), field_name="acquisition clock"),
+            started_at,
+        )
+        return build_price_ingestion_result(
             provider=self.name,
             original_source=self.name,
-            usage_mode=DataUsageMode.PUBLIC,
             dataset="daily_price_bar",
-            requested_at=request.requested_at,
+            request=request,
+            field_map_version=YAHOO_PRICE_FIELD_MAP_VERSION,
+            usage_mode=DataUsageMode.PUBLIC,
+            rows=tuple(rows),
+            failures=tuple(failures),
             started_at=started_at,
             completed_at=completed_at,
-            status=status,
-            request_fingerprint=fingerprint,
-            content_hash=hashlib.sha256(content).hexdigest(),
-            row_count=len(bars),
-            error_message="; ".join(failures)[:4000] if failures else None,
         )
-        return PriceIngestionResult(batch=batch, bars=tuple(bars))
 
     def _normalize_item(
         self,
@@ -136,11 +120,7 @@ class YahooFinancePriceProvider:
         *,
         security_id: UUID,
         provider_identifier: str,
-        batch_id: UUID,
-        ingested_at: datetime,
-    ) -> list[PriceBar]:
-        if raw.empty:
-            raise ProviderDataError("provider returned no rows")
+    ) -> list[NormalizedPriceRow]:
         work = raw.copy()
         if isinstance(work.columns, pd.MultiIndex):
             # For a one-symbol request, take the OHLC field level regardless of
@@ -155,7 +135,7 @@ class YahooFinancePriceProvider:
             (name for name in work.columns if str(name).lower() in {"date", "datetime"}), None
         )
         if date_column is None:
-            raise ProviderDataError("provider response has no date column")
+            raise ValueError("Yahoo response has no date column")
         work = work.rename(
             columns={
                 date_column: "session_date",
@@ -167,22 +147,23 @@ class YahooFinancePriceProvider:
                 "Volume": "volume",
             }
         )
-        normalized, _ = normalize_price_frame(work)
-        output: list[PriceBar] = []
+        normalized, report = normalize_price_frame(work)
+        output: list[NormalizedPriceRow] = []
         for row in normalized.to_dict(orient="records"):
             session_date = pd.Timestamp(row["session_date"]).date()
-            # Midnight UTC is explicitly an estimated market timestamp. It is
-            # conservative for availability because fetched_at is always later.
-            effective_at = datetime.combine(session_date, time.min, tzinfo=UTC)
             close = float(row["close"])
             adjusted_close = float(row["adjusted_close"])
+            flags = [DataQualityFlag.ESTIMATED_TIMESTAMP]
+            if "adjusted_close was unavailable" in " ".join(report.warnings):
+                flags.append(DataQualityFlag.UNADJUSTED)
             output.append(
-                PriceBar(
+                NormalizedPriceRow(
                     security_id=security_id,
+                    provider_identifier=provider_identifier,
+                    source_record_id=(f"yahoo:{provider_identifier}:{session_date.isoformat()}"),
                     session_date=session_date,
-                    effective_at=effective_at,
-                    available_at=ingested_at,
-                    ingested_at=ingested_at,
+                    effective_at=date_key_effective_at(session_date),
+                    source_available_at=None,
                     open=float(row["open"]),
                     high=float(row["high"]),
                     low=float(row["low"]),
@@ -191,15 +172,19 @@ class YahooFinancePriceProvider:
                     volume=float(row["volume"]),
                     currency=self._default_currency,
                     adjustment_factor=adjusted_close / close,
+                    total_return_factor=None,
                     source=self.name,
                     usage_mode=DataUsageMode.PUBLIC,
-                    source_record_id=f"{provider_identifier}:{session_date.isoformat()}",
-                    provider_identifier=provider_identifier,
-                    ingestion_batch_id=batch_id,
-                    quality_flags=(
-                        DataQualityFlag.ESTIMATED_TIMESTAMP,
-                        DataQualityFlag.SNAPSHOT_ONLY,
-                    ),
+                    quality_flags=tuple(flags),
+                    field_map_version=YAHOO_PRICE_FIELD_MAP_VERSION,
                 )
             )
         return output
+
+
+def _no_data_failure(provider_identifier: str) -> PriceItemFailure:
+    return PriceItemFailure(
+        provider_identifier=provider_identifier,
+        category=PriceFailureCategory.NO_DATA,
+        message=f"{provider_identifier}: no Yahoo daily-price data",
+    )
