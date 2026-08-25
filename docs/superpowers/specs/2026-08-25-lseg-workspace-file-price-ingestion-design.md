@@ -37,8 +37,9 @@ cloud credentials.
    provider contract and downstream pipeline.
 6. Preserve point-in-time honesty when the source does not expose the original
    publication or correction timestamp.
-7. Make retries idempotent while treating changed source content as a new
-   observable vintage.
+7. Make retries idempotent while treating changed source content with a later
+   knowledge timestamp as a new observable vintage and rejecting contradictory
+   values claimed for the same authoritative timestamp.
 8. Provide a finite local CLI command and a manually gated live smoke test.
 
 ## Non-goals
@@ -158,8 +159,12 @@ An export from Workspace remains `source="lseg"` and
 the underlying license provenance.
 
 Transport and original source remain distinct. A file ingestion batch has
-`provider="file"`, while each resulting bar's `source` is the declared original
-provider, such as `lseg`. A live desktop batch and its bars both use `lseg`.
+`provider="file"` and `original_source` equal to the declared provider, while
+each resulting bar's `source` is that same original provider, such as `lseg`.
+A live desktop batch has both `provider="lseg"` and
+`original_source="lseg"`, and its bars use `source="lseg"`. Keeping the
+original source on the batch preserves provenance when every requested item
+fails and no bars exist.
 
 ### Local command composition
 
@@ -180,8 +185,21 @@ milestone rejects a request whose identifier mapping is not valid at both ends
 of the requested date interval; ranges crossing a mapping boundary must be
 split explicitly.
 
-The command prints a JSON summary containing status, batch ID, source, row
-counts, and sanitized failures. It does not print price values or raw payloads.
+The command prints a JSON summary containing status, batch ID, transport
+source, original source, row counts, and sanitized failures. It does not print
+price values or raw payloads.
+`PriceIngestionResult` and `PriceIngestionSummary` carry typed item failures so
+the command never has to parse a formatted batch error string to produce this
+envelope. After argparse succeeds, expected Pydantic request-validation and
+SQLAlchemy operational/integrity failures also map to fixed validation or
+storage envelopes; exception text, SQL, driver details, and database paths are
+never echoed. Unexpected programming errors are not swallowed.
+
+Operational documentation requires a verified backup followed by
+`alembic upgrade head` for an existing database before this command is used. A
+fresh database should also be initialized through Alembic. Development
+`create_schema()` may create missing tables but is not a substitute for
+migrating an existing pre-provenance schema.
 
 ## LSEG historical-price mapping
 
@@ -316,14 +334,24 @@ Add `DataUsageMode` with these persisted values:
 - `unverified`: legacy records whose handling restriction was not recorded.
 
 `usage_mode` is non-null on both `IngestionBatch` and `PriceBar`, and on their
-SQLAlchemy records. LSEG desktop data is always `research_only`; this cannot be
-overridden by CLI input. Fixture and Yahoo adapters are updated to emit
-`synthetic` and `public` respectively. Generic files require an explicit value.
+SQLAlchemy records. `IngestionBatch.original_source` is also a required,
+persisted 1-to-80-character value; every successful bar's `source` must equal
+it. LSEG desktop data is always `research_only`; this cannot be overridden by
+CLI input. Fixture and Yahoo adapters are updated to emit `synthetic` and
+`public` respectively. Generic files require an explicit value.
 
-An Alembic migration adds both columns with a temporary `unverified` server
-default, backfills all existing rows to `unverified` as approved, makes the
-columns non-null, and removes the server default where the database supports
-that operation. The migration does not infer rights from legacy `source` text.
+The first of two ordered Alembic migrations lands atomically with the required
+domain fields. It adds both usage columns with a temporary `unverified` server
+default and adds the batch `original_source` column with a temporary
+`provider`-derived backfill. It makes all three columns non-null and removes the
+server defaults where the database supports that operation. This migration
+does not infer rights from legacy `source` text; copying the legacy batch
+provider to `original_source` records only the best available transport/source
+context. A following attempt-identity migration adds the batch/source-record
+unique constraint. Before doing so, it fails closed with an actionable error if
+a legacy database already contains duplicate
+`(ingestion_batch_id, source_record_id)` pairs; it never deletes or merges an
+unverifiable vintage automatically.
 
 `usage_mode` is an application handling restriction, not an assertion that a
 contract has been reviewed. The LSEG row in `docs/vendor_entitlements.md`
@@ -344,24 +372,37 @@ Live and file sources also need content-aware attempt identity:
    timestamp-independent representation.
 2. Hash that representation to form `content_hash`.
 3. Derive the batch key and deterministic batch ID from provider, dataset,
-   request fingerprint, field-map version, usage mode, and content hash.
+   request fingerprint, field-map version, usage mode, and content hash. The
+   content hash already binds the separately declared original source.
 
 The hash input is a pre-domain `NormalizedPriceContent` projection constructed
-before `IngestionBatch` and `PriceBar`. For each sorted row it contains the
+before `IngestionBatch` and `PriceBar`. It contains a required top-level
+`original_source` value, validated to the same 1-to-80-character contract as
+the domain fields, so an all-failure result remains source-distinct. For each
+sorted row it contains the
 canonical security ID, provider identifier, source record ID, session date,
 deterministic date-derived effective time, raw and adjusted numeric values
 encoded with `float.hex()`, currency, original source, usage mode, sorted quality
 flags, and field-map version. It also contains sorted item-failure identifiers
 and categories. Generated UUIDs plus requested, acquisition, availability, and
-ingestion timestamps are excluded.
+ingestion timestamps are excluded. A trustworthy, explicitly source-supplied
+file `available_at` is content provenance rather than a generated acquisition
+timestamp, so it is included; changing that source timestamp must create a new
+content identity.
 
 After hashing this projection, the connector derives the batch key/ID and only
 then constructs domain bars referencing that batch ID. This ordering avoids a
 batch-ID/content-hash construction cycle.
 
-An identical retry therefore resolves to the same batch. A changed value,
-adjustment mapping, or item-level result produces a new batch and a new
-`available_at` vintage.
+An identical retry therefore resolves to the same batch. Changed normalized
+content produces a new attempted batch identity. When availability is generated
+at acquisition, a later correction naturally receives a later `available_at`
+and persists as a new vintage. When a file supplies authoritative
+`available_at`, a changed observation is accepted only if that timestamp also
+advances. A different value claiming the same
+source/effective/authoritative-availability key is contradictory provenance;
+the repository raises a conflict and the CLI transaction rolls back the new
+batch and bars.
 
 Price persistence additionally recognizes an existing
 `ingestion_batch_id`/`source_record_id` pair as the same content-addressed row
@@ -415,6 +456,18 @@ Structured SDK/status attributes take precedence when classifying an error.
 Unknown SDK exceptions become a generic provider error with a sanitized message;
 the adapter does not rely solely on brittle message matching.
 
+The file adapter translates malformed CSV/Parquet payloads, invalid required
+`session_date` values, invalid optional timestamp text, and numeric/schema
+normalization defects into fixed `ProviderDataError` messages. Pandas, PyArrow,
+Pydantic, and parser exception text never crosses the provider boundary or
+bypasses the CLI's safe JSON error envelope; translated errors suppress the
+original rendered cause chain.
+
+Cross-record provider-result invariants retain detailed internal validator
+messages for unit diagnosis, but `PriceIngestionService` translates their
+`ValueError` to one fixed `ProviderDataError` before persistence. The CLI does
+not broadly catch `ValueError`, so unrelated programming defects remain visible.
+
 Item-level data failures have these batch semantics:
 
 - a no-data or invalid-identifier result for one RIC is an item failure, not a
@@ -452,6 +505,8 @@ An injected fake gateway verifies:
 File-provider tests cover:
 
 - equivalent CSV and Parquet normalization/content hashes;
+- all-failure original-source identity and persistence;
+- fixed, sanitized CSV, Parquet, timestamp, schema, and numeric parse errors;
 - strict required columns and timezone validation;
 - explicit source/usage provenance;
 - missing adjusted close;
@@ -464,11 +519,16 @@ Fake gateway/file inputs plus SQLite verify:
 
 - both providers use `PriceIngestionService` and the same repository path;
 - identical reruns insert no new batch or bars;
-- changed content creates a later knowledge-time vintage;
+- changed content with later generated or authoritative availability creates a
+  later knowledge-time vintage, while changed content at the same authoritative
+  timestamp conflicts and rolls back;
 - `price_history_as_of` returns the appropriate vintage at each cutoff;
-- usage mode round-trips on batches and bars;
-- an Alembic upgrade from the current head backfills legacy rows to
-  `unverified`, and downgrade removes exactly the two new columns;
+- usage mode round-trips on batches and bars, and original source round-trips
+  on batches even without bars;
+- ordered Alembic upgrades from the current head backfill legacy usage to
+  `unverified`, backfill batch original source from its provider, and add
+  attempt identity; downgrades remove the constraint and exactly the three new
+  columns;
 - RIC resolution is temporal and fails on unknown/ambiguous mappings; and
 - CLI JSON summaries contain no raw prices or secrets.
 
@@ -501,8 +561,9 @@ The milestone is complete when:
    `source="lseg"`, `usage_mode="research_only"`, `SNAPSHOT_ONLY` data while the
    contractual entitlement inventory remains `Unverified`.
 4. Raw OHLCV and adjusted close remain semantically separate.
-5. Repeating an identical request is idempotent, while changed source content
-   becomes a later knowledge-time vintage.
+5. Repeating an identical request is idempotent; changed source content with a
+   later knowledge timestamp becomes a later vintage, while contradictory
+   content at the same authoritative timestamp is rejected atomically.
 6. Equivalent CSV and Parquet inputs traverse the same provider-neutral
    ingestion path and yield equivalent normalized content.
 7. A bad file, closed Workspace, unavailable entitlement, quota response, and
