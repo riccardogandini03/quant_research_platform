@@ -446,6 +446,30 @@ def test_frame_limit_or_truncation_metadata_is_rejected(
 
 
 @pytest.mark.parametrize(
+    ("frame_kind", "status"),
+    [
+        ("raw", "within_limit_but_truncated"),
+        ("adjusted", "within_limit_but_truncated"),
+        ("raw", "not_truncated_limit_reached"),
+        ("adjusted", "not_truncated_limit_reached"),
+    ],
+)
+def test_compound_status_with_any_positive_limit_or_truncation_is_rejected(
+    frame_kind: str, status: str
+) -> None:
+    module = FakeLsegDataModule()
+    frame = pd.DataFrame({"value": [1.0]})
+    frame.attrs["status"] = status
+    adjustments = LSEG_RAW_ADJUSTMENTS if frame_kind == "raw" else LSEG_ADJUSTED_ADJUSTMENTS
+    module.history_frames[("RIC", adjustments, "2024-01-01")] = frame
+
+    with pytest.raises(ProviderDataError) as exc_info:
+        _gateway(module).fetch_daily_prices(("RIC",), date(2024, 1, 1), date(2024, 1, 2))
+
+    assert str(exc_info.value) == "LSEG history response reported a limit or truncation"
+
+
+@pytest.mark.parametrize(
     ("frame_kind", "attribute", "value"),
     [
         ("raw", "truncated", False),

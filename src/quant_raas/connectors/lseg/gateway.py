@@ -184,7 +184,15 @@ _FALSE_INDICATOR_TEXT = frozenset(
     {"", "0", "false", "none", "no", "off", "ok", "complete", "completed", "success"}
 )
 _TRUE_INDICATOR_TEXT = frozenset({"1", "true", "yes", "on"})
-_NEGATIVE_INDICATOR_MARKERS = (
+_NEGATIVE_TRUNCATION_MARKERS = (
+    "truncation_not_reached",
+    "not_reached_truncation",
+    "without_truncation",
+    "not_truncated",
+    "non_truncated",
+    "no_truncation",
+    "not_truncation",
+    "untruncated",
     "not_trunc",
     "nottrunc",
     "non_trunc",
@@ -192,6 +200,22 @@ _NEGATIVE_INDICATOR_MARKERS = (
     "no_trunc",
     "without_trunc",
     "untrunc",
+)
+_POSITIVE_TRUNCATION_MARKERS = (
+    "truncation_reached",
+    "truncated",
+    "truncation",
+)
+_NEGATIVE_LIMIT_MARKERS = (
+    "limit_not_reached",
+    "not_reached_limit",
+    "without_limitation",
+    "within_limit",
+    "not_limited",
+    "non_limited",
+    "no_limitation",
+    "not_limitation",
+    "unlimited",
     "not_limit",
     "notlimit",
     "non_limit",
@@ -199,18 +223,13 @@ _NEGATIVE_INDICATOR_MARKERS = (
     "no_limit",
     "without_limit",
     "unlimit",
-    "within_limit",
 )
-_POSITIVE_INDICATOR_MARKERS = (
-    "truncated",
-    "truncation",
-    "limited",
+_POSITIVE_LIMIT_MARKERS = (
     "limit_reached",
     "reached_limit",
     "limit_exceeded",
     "exceeded_limit",
-    "partial",
-    "incomplete",
+    "limited",
 )
 
 
@@ -218,18 +237,36 @@ def _normalized_indicator_text(value: str) -> str:
     return "_".join(value.strip().casefold().replace("-", "_").split())
 
 
+def _concept_has_affirmative_claim(
+    token: str,
+    *,
+    negative_markers: Sequence[str],
+    positive_markers: Sequence[str],
+) -> bool:
+    unnegated = token
+    for marker in negative_markers:
+        unnegated = unnegated.replace(marker, "")
+    return any(marker in unnegated for marker in positive_markers)
+
+
 def _text_indicator_is_affirmative(value: str) -> bool:
     token = _normalized_indicator_text(value)
-    if token in _FALSE_INDICATOR_TEXT or any(
-        marker in token for marker in _NEGATIVE_INDICATOR_MARKERS
-    ):
+    if token in _FALSE_INDICATOR_TEXT:
         return False
     if token in _TRUE_INDICATOR_TEXT:
         return True
     try:
         return float(token) > 0
     except ValueError:
-        return any(marker in token for marker in _POSITIVE_INDICATOR_MARKERS)
+        return _concept_has_affirmative_claim(
+            token,
+            negative_markers=_NEGATIVE_LIMIT_MARKERS,
+            positive_markers=_POSITIVE_LIMIT_MARKERS,
+        ) or _concept_has_affirmative_claim(
+            token,
+            negative_markers=_NEGATIVE_TRUNCATION_MARKERS,
+            positive_markers=_POSITIVE_TRUNCATION_MARKERS,
+        )
 
 
 def _positive_indicator(value: object) -> bool:
