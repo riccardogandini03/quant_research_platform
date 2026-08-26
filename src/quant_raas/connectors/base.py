@@ -27,6 +27,18 @@ class ProviderDataError(ProviderError):
     """Raised when a provider response violates the expected data contract."""
 
 
+class ProviderSessionError(ProviderError):
+    """The selected local provider session could not be opened or used."""
+
+
+class ProviderEntitlementError(ProviderError):
+    """The active provider session lacks permission for the request."""
+
+
+class ProviderQuotaError(ProviderError):
+    """The provider reported a request, rate, or response-size limit."""
+
+
 @dataclass(frozen=True, slots=True)
 class BatchIdentity:
     batch_id: UUID
