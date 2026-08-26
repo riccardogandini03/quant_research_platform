@@ -6,6 +6,7 @@ import importlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from numbers import Real
 from typing import Literal, Never, Protocol, cast
 
 import pandas as pd
@@ -179,14 +180,75 @@ def _raise_provider_error(error: Exception) -> Never:
     raise ProviderError("LSEG desktop request failed") from None
 
 
+_FALSE_INDICATOR_TEXT = frozenset(
+    {"", "0", "false", "none", "no", "off", "ok", "complete", "completed", "success"}
+)
+_TRUE_INDICATOR_TEXT = frozenset({"1", "true", "yes", "on"})
+_NEGATIVE_INDICATOR_MARKERS = (
+    "not_trunc",
+    "nottrunc",
+    "non_trunc",
+    "nontrunc",
+    "no_trunc",
+    "without_trunc",
+    "untrunc",
+    "not_limit",
+    "notlimit",
+    "non_limit",
+    "nonlimit",
+    "no_limit",
+    "without_limit",
+    "unlimit",
+    "within_limit",
+)
+_POSITIVE_INDICATOR_MARKERS = (
+    "truncated",
+    "truncation",
+    "limited",
+    "limit_reached",
+    "reached_limit",
+    "limit_exceeded",
+    "exceeded_limit",
+    "partial",
+    "incomplete",
+)
+
+
+def _normalized_indicator_text(value: str) -> str:
+    return "_".join(value.strip().casefold().replace("-", "_").split())
+
+
+def _text_indicator_is_affirmative(value: str) -> bool:
+    token = _normalized_indicator_text(value)
+    if token in _FALSE_INDICATOR_TEXT or any(
+        marker in token for marker in _NEGATIVE_INDICATOR_MARKERS
+    ):
+        return False
+    if token in _TRUE_INDICATOR_TEXT:
+        return True
+    try:
+        return float(token) > 0
+    except ValueError:
+        return any(marker in token for marker in _POSITIVE_INDICATOR_MARKERS)
+
+
 def _positive_indicator(value: object) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
-        return value > 0
+    if isinstance(value, Real):
+        return float(value) > 0
     if isinstance(value, str):
-        return value.strip().casefold() not in {"", "0", "false", "none", "no", "ok"}
-    return value is not None
+        return _text_indicator_is_affirmative(value)
+
+    item = getattr(value, "item", None)
+    if callable(item) and getattr(value, "ndim", None) == 0:
+        try:
+            scalar = item()
+        except (TypeError, ValueError):
+            return False
+        if scalar is not value:
+            return _positive_indicator(scalar)
+    return False
 
 
 def _frame_reports_limit_or_truncation(frame: pd.DataFrame) -> bool:
@@ -194,10 +256,8 @@ def _frame_reports_limit_or_truncation(frame: pd.DataFrame) -> bool:
         key_token = str(key).casefold()
         if ("limit" in key_token or "trunc" in key_token) and _positive_indicator(value):
             return True
-        if "status" in key_token:
-            value_token = str(value).casefold()
-            if "limit" in value_token or "trunc" in value_token:
-                return True
+        if "status" in key_token and _positive_indicator(value):
+            return True
     return False
 
 

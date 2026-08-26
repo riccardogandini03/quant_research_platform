@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -202,66 +203,142 @@ def test_gateway_uses_exact_fields_adjustments_header_type_and_sequential_ric_or
 
     _gateway(module).fetch_daily_prices(("RIC-1", "RIC-2"), date(2024, 1, 1), date(2025, 1, 1))
 
-    expected_order = [
-        ("open", None, None, None),
-        ("currency", "RIC-1", None, None),
-        ("history", "RIC-1", "2024-01-01", ("unadjusted",)),
+    assert module.calls == [
+        ("open", {"name": "desktop.workspace"}),
+        (
+            "currency",
+            {"universe": ["RIC-1"], "fields": ["TR.PriceClose.currency"]},
+        ),
         (
             "history",
-            "RIC-1",
-            "2024-01-01",
-            ("exchangeCorrection", "manualCorrection", "CCH", "CRE", "RPO", "RTS"),
+            {
+                "universe": ["RIC-1"],
+                "fields": ["OPEN_PRC", "HIGH_1", "LOW_1", "TRDPRC_1", "ACVOL_UNS"],
+                "interval": "1D",
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+                "adjustments": ["unadjusted"],
+                "header_type": "header-name",
+            },
         ),
-        ("history", "RIC-1", "2025-01-01", ("unadjusted",)),
         (
             "history",
-            "RIC-1",
-            "2025-01-01",
-            ("exchangeCorrection", "manualCorrection", "CCH", "CRE", "RPO", "RTS"),
+            {
+                "universe": ["RIC-1"],
+                "fields": ["TRDPRC_1"],
+                "interval": "1D",
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+                "adjustments": [
+                    "exchangeCorrection",
+                    "manualCorrection",
+                    "CCH",
+                    "CRE",
+                    "RPO",
+                    "RTS",
+                ],
+                "header_type": "header-name",
+            },
         ),
-        ("currency", "RIC-2", None, None),
-        ("history", "RIC-2", "2024-01-01", ("unadjusted",)),
         (
             "history",
-            "RIC-2",
-            "2024-01-01",
-            ("exchangeCorrection", "manualCorrection", "CCH", "CRE", "RPO", "RTS"),
+            {
+                "universe": ["RIC-1"],
+                "fields": ["OPEN_PRC", "HIGH_1", "LOW_1", "TRDPRC_1", "ACVOL_UNS"],
+                "interval": "1D",
+                "start": "2025-01-01",
+                "end": "2025-01-01",
+                "adjustments": ["unadjusted"],
+                "header_type": "header-name",
+            },
         ),
-        ("history", "RIC-2", "2025-01-01", ("unadjusted",)),
         (
             "history",
-            "RIC-2",
-            "2025-01-01",
-            ("exchangeCorrection", "manualCorrection", "CCH", "CRE", "RPO", "RTS"),
+            {
+                "universe": ["RIC-1"],
+                "fields": ["TRDPRC_1"],
+                "interval": "1D",
+                "start": "2025-01-01",
+                "end": "2025-01-01",
+                "adjustments": [
+                    "exchangeCorrection",
+                    "manualCorrection",
+                    "CCH",
+                    "CRE",
+                    "RPO",
+                    "RTS",
+                ],
+                "header_type": "header-name",
+            },
         ),
-        ("close", None, None, None),
+        (
+            "currency",
+            {"universe": ["RIC-2"], "fields": ["TR.PriceClose.currency"]},
+        ),
+        (
+            "history",
+            {
+                "universe": ["RIC-2"],
+                "fields": ["OPEN_PRC", "HIGH_1", "LOW_1", "TRDPRC_1", "ACVOL_UNS"],
+                "interval": "1D",
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+                "adjustments": ["unadjusted"],
+                "header_type": "header-name",
+            },
+        ),
+        (
+            "history",
+            {
+                "universe": ["RIC-2"],
+                "fields": ["TRDPRC_1"],
+                "interval": "1D",
+                "start": "2024-01-01",
+                "end": "2024-12-31",
+                "adjustments": [
+                    "exchangeCorrection",
+                    "manualCorrection",
+                    "CCH",
+                    "CRE",
+                    "RPO",
+                    "RTS",
+                ],
+                "header_type": "header-name",
+            },
+        ),
+        (
+            "history",
+            {
+                "universe": ["RIC-2"],
+                "fields": ["OPEN_PRC", "HIGH_1", "LOW_1", "TRDPRC_1", "ACVOL_UNS"],
+                "interval": "1D",
+                "start": "2025-01-01",
+                "end": "2025-01-01",
+                "adjustments": ["unadjusted"],
+                "header_type": "header-name",
+            },
+        ),
+        (
+            "history",
+            {
+                "universe": ["RIC-2"],
+                "fields": ["TRDPRC_1"],
+                "interval": "1D",
+                "start": "2025-01-01",
+                "end": "2025-01-01",
+                "adjustments": [
+                    "exchangeCorrection",
+                    "manualCorrection",
+                    "CCH",
+                    "CRE",
+                    "RPO",
+                    "RTS",
+                ],
+                "header_type": "header-name",
+            },
+        ),
+        ("close", {}),
     ]
-    observed_order = []
-    for name, kwargs in module.calls:
-        observed_order.append(
-            (
-                name,
-                kwargs.get("universe", [None])[0],
-                kwargs.get("start"),
-                tuple(kwargs["adjustments"]) if "adjustments" in kwargs else None,
-            )
-        )
-    assert observed_order == expected_order
-
-    currency_calls = [kwargs for name, kwargs in module.calls if name == "currency"]
-    assert currency_calls == [
-        {"universe": ["RIC-1"], "fields": ["TR.PriceClose.currency"]},
-        {"universe": ["RIC-2"], "fields": ["TR.PriceClose.currency"]},
-    ]
-    history_calls = [kwargs for name, kwargs in module.calls if name == "history"]
-    for index, kwargs in enumerate(history_calls):
-        raw_call = index % 2 == 0
-        assert kwargs["fields"] == (
-            ["OPEN_PRC", "HIGH_1", "LOW_1", "TRDPRC_1", "ACVOL_UNS"] if raw_call else ["TRDPRC_1"]
-        )
-        assert kwargs["interval"] == "1D"
-        assert kwargs["header_type"] == FakeHeaderType.NAME
-        assert kwargs["end"] in {"2024-12-31", "2025-01-01"}
 
 
 def test_daily_chunks_are_consecutive_non_overlapping_and_at_most_366_days() -> None:
@@ -343,19 +420,57 @@ def test_unknown_sdk_exception_becomes_a_sanitized_provider_error() -> None:
 
 
 @pytest.mark.parametrize(
-    ("attribute", "value"),
-    [("truncated", True), ("limit", 1), ("status", "response_limit_reached")],
+    ("frame_kind", "attribute", "value"),
+    [
+        ("raw", "truncated", True),
+        ("adjusted", "truncated", np.bool_(True)),
+        ("raw", "limit", 1),
+        ("adjusted", "limit", np.int64(1)),
+        ("raw", "status", "response_limit_reached"),
+        ("adjusted", "status", "truncated"),
+    ],
 )
-def test_frame_limit_or_truncation_metadata_is_rejected(attribute: str, value: object) -> None:
+def test_frame_limit_or_truncation_metadata_is_rejected(
+    frame_kind: str, attribute: str, value: object
+) -> None:
     module = FakeLsegDataModule()
-    raw_frame = pd.DataFrame({"value": [1.0]})
-    raw_frame.attrs[attribute] = value
-    module.history_frames[("RIC", LSEG_RAW_ADJUSTMENTS, "2024-01-01")] = raw_frame
+    frame = pd.DataFrame({"value": [1.0]})
+    frame.attrs[attribute] = value
+    adjustments = LSEG_RAW_ADJUSTMENTS if frame_kind == "raw" else LSEG_ADJUSTED_ADJUSTMENTS
+    module.history_frames[("RIC", adjustments, "2024-01-01")] = frame
 
     with pytest.raises(ProviderDataError) as exc_info:
         _gateway(module).fetch_daily_prices(("RIC",), date(2024, 1, 1), date(2024, 1, 2))
 
     assert str(exc_info.value) == "LSEG history response reported a limit or truncation"
+
+
+@pytest.mark.parametrize(
+    ("frame_kind", "attribute", "value"),
+    [
+        ("raw", "truncated", False),
+        ("adjusted", "truncated", np.bool_(False)),
+        ("raw", "limit", 0),
+        ("adjusted", "limit", np.int64(0)),
+        ("raw", "status", "not_truncated"),
+        ("adjusted", "status", "unlimited"),
+        ("raw", "limit", []),
+        ("adjusted", "truncated", None),
+    ],
+)
+def test_frame_negative_limit_or_truncation_metadata_is_accepted(
+    frame_kind: str, attribute: str, value: object
+) -> None:
+    module = FakeLsegDataModule()
+    frame = pd.DataFrame({"value": [1.0]})
+    frame.attrs[attribute] = value
+    adjustments = LSEG_RAW_ADJUSTMENTS if frame_kind == "raw" else LSEG_ADJUSTED_ADJUSTMENTS
+    module.history_frames[("RIC", adjustments, "2024-01-01")] = frame
+
+    result = _gateway(module).fetch_daily_prices(("RIC",), date(2024, 1, 1), date(2024, 1, 2))
+
+    assert len(result.items) == 1
+    assert result.failures == ()
 
 
 def test_gateway_never_passes_a_proxy_port_or_cloud_credentials() -> None:
