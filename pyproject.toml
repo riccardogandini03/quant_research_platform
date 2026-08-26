@@ -39,6 +39,7 @@ calendar = ["exchange-calendars>=4.7,<5"]
 # LSEG software is installable, but useful access still requires contracted
 # entitlements and an approved desktop or platform session.
 lseg = ["lseg-data>=2,<3"]
+parquet = ["pyarrow>=25,<26"]
 # Bloomberg's SDK installation channel depends on the client's environment.
 # Keep this named extra as an integration boundary; follow Bloomberg's approved
 # installation instructions before enabling the connector.
