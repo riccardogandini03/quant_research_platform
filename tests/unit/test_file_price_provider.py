@@ -108,6 +108,23 @@ def test_casefolded_column_collisions_are_rejected(
         )
 
 
+def test_duplicate_csv_header_is_rejected_before_pandas_can_mangle_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-header.csv"
+    path.write_text(
+        "provider_identifier,session_date,open,high,low,close,volume,currency,currency\n"
+        "EXAMPLE.O,2024-01-08,100,102,99,101,1000,USD,EUR\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ProviderDataError,
+        match="price file contains duplicate normalized columns",
+    ):
+        _provider(path).fetch_daily_bars(_request("EXAMPLE.O"))
+
+
 def test_file_provider_preserves_original_source_and_usage_mode(
     tmp_path: Path,
     price_frame: pd.DataFrame,
@@ -209,12 +226,13 @@ def test_unsupported_suffix_missing_columns_and_malformed_csv_raise_fixed_data_e
     def broken_read_csv(*args: object, **kwargs: object) -> pd.DataFrame:
         raise pd.errors.ParserError(sentinel)
 
+    malformed_path = _write_csv(tmp_path / "malformed.csv", price_frame)
     monkeypatch.setattr(pd, "read_csv", broken_read_csv)
     with pytest.raises(
         ProviderDataError,
         match=r"^CSV price file could not be read$",
     ) as caught:
-        _provider(tmp_path / "malformed.csv").fetch_daily_bars(_request("EXAMPLE.O"))
+        _provider(malformed_path).fetch_daily_bars(_request("EXAMPLE.O"))
     assert sentinel not in str(caught.value)
     assert sentinel not in "".join(traceback.format_exception(caught.value))
 
@@ -392,6 +410,45 @@ def test_csv_and_parquet_equivalent_values_have_identical_content_hash_and_batch
 
     assert csv_result.batch.content_hash == parquet_result.batch.content_hash
     assert csv_result.batch.batch_id == parquet_result.batch.batch_id
+
+
+def test_leading_zero_contract_text_is_preserved_and_csv_parquet_identity_matches(
+    tmp_path: Path,
+    price_frame: pd.DataFrame,
+) -> None:
+    textual = price_frame.iloc[:1].assign(
+        provider_identifier="001",
+        source_record_id="000007",
+    )
+    csv_path = _write_csv(tmp_path / "textual.csv", textual)
+    parquet_path = tmp_path / "textual.parquet"
+    textual.to_parquet(parquet_path, index=False)
+
+    csv_result = _provider(csv_path).fetch_daily_bars(_request("001"))
+    parquet_result = _provider(parquet_path).fetch_daily_bars(_request("001"))
+
+    assert csv_result.bars[0].provider_identifier == "001"
+    assert csv_result.bars[0].source_record_id == "000007"
+    assert parquet_result.bars[0].provider_identifier == "001"
+    assert parquet_result.bars[0].source_record_id == "000007"
+    assert csv_result.batch.content_hash == parquet_result.batch.content_hash
+    assert csv_result.batch.batch_id == parquet_result.batch.batch_id
+
+
+def test_csv_preserves_contract_text_that_matches_default_missing_tokens(
+    tmp_path: Path,
+    price_frame: pd.DataFrame,
+) -> None:
+    textual = price_frame.iloc[:1].assign(
+        provider_identifier="NA",
+        source_record_id="NULL",
+    )
+    path = _write_csv(tmp_path / "textual.csv", textual)
+
+    result = _provider(path).fetch_daily_bars(_request("NA"))
+
+    assert result.bars[0].provider_identifier == "NA"
+    assert result.bars[0].source_record_id == "NULL"
 
 
 def test_missing_parquet_engine_raises_not_configured_without_csv_fallback(

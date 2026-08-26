@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import csv
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -181,7 +182,13 @@ class FilePriceProvider:
         suffix = self._path.suffix.lower()
         if suffix == ".csv":
             try:
-                return pd.read_csv(self._path)
+                _validate_csv_header(self._path)
+            except ProviderDataError:
+                raise
+            except Exception:
+                raise ProviderDataError("CSV price file could not be read") from None
+            try:
+                return pd.read_csv(self._path, dtype=str, keep_default_na=False)
             except Exception:
                 raise ProviderDataError("CSV price file could not be read") from None
         if suffix == ".parquet":
@@ -197,9 +204,7 @@ class FilePriceProvider:
 
     @staticmethod
     def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
-        normalized_columns = [str(column).strip().casefold() for column in frame.columns]
-        if len(normalized_columns) != len(set(normalized_columns)):
-            raise ProviderDataError("price file contains duplicate normalized columns")
+        normalized_columns = _normalized_column_names(frame.columns)
         frame = frame.copy()
         frame.columns = normalized_columns
         missing = sorted(set(FILE_REQUIRED_COLUMNS).difference(frame.columns))
@@ -225,6 +230,23 @@ class FilePriceProvider:
             provider_identifier=provider_identifiers,
             session_date=parsed_session_dates.dt.date,
         )
+
+
+def _validate_csv_header(path: Path) -> None:
+    with path.open(encoding="utf-8-sig", newline="") as source_file:
+        reader = csv.reader(source_file, strict=True)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return
+    _normalized_column_names(header)
+
+
+def _normalized_column_names(columns: Iterable[object]) -> list[str]:
+    normalized = [str(column).strip().casefold() for column in columns]
+    if len(normalized) != len(set(normalized)):
+        raise ProviderDataError("price file contains duplicate normalized columns")
+    return normalized
 
 
 def _required_identifier(value: object) -> str:
