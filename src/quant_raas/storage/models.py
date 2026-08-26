@@ -217,6 +217,11 @@ class PriceBarRecord(Base):
     __tablename__ = "price_bar"
     __table_args__ = (
         UniqueConstraint(
+            "ingestion_batch_id",
+            "source_record_id",
+            name="uq_price_bar_ingestion_batch_source_record",
+        ),
+        UniqueConstraint(
             "security_id",
             "frequency",
             "source",

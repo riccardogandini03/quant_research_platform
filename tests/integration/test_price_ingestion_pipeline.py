@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from quant_raas.connectors.fixture import FixturePriceProvider
+from quant_raas.domain.enums import DataUsageMode
 from quant_raas.domain.market import PriceBarRequest, PriceRequestItem
 from quant_raas.domain.security import Security
 from quant_raas.ingestion.prices import PriceIngestionService
@@ -49,6 +50,7 @@ def test_fixture_price_ingestion_is_atomic_and_idempotent(
     assert second.bars_received == 6
     assert second.bars_inserted == 0
     assert first.batch.batch_id == second.batch.batch_id
+    assert second.batch == first.batch
 
     history = market.price_history_as_of(
         [sample_security.security_id],
@@ -60,3 +62,4 @@ def test_fixture_price_ingestion_is_atomic_and_idempotent(
     assert len(history) == 6
     assert [bar.close for bar in history] == [100.0, 101.0, 99.0, 102.0, 103.0, 104.0]
     assert all(bar.ingested_at <= fixed_now for bar in history)
+    assert all(bar.usage_mode == DataUsageMode.SYNTHETIC for bar in history)

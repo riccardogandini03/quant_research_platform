@@ -531,28 +531,26 @@ class SqlAlchemyMarketDataRepository:
         self.session = session
 
     def add_ingestion_batch(self, batch: IngestionBatch) -> IngestionBatch:
-        existing = self.session.scalar(
+        existing_by_id = self.session.get(IngestionBatchRecord, batch.batch_id)
+        existing_by_key = self.session.scalar(
             select(IngestionBatchRecord).where(IngestionBatchRecord.batch_key == batch.batch_key)
         )
-        if existing:
-            return IngestionBatch.model_validate(
-                {
-                    "batch_id": existing.batch_id,
-                    "batch_key": existing.batch_key,
-                    "provider": existing.provider,
-                    "original_source": existing.original_source,
-                    "usage_mode": existing.usage_mode,
-                    "dataset": existing.dataset,
-                    "requested_at": existing.requested_at,
-                    "started_at": existing.started_at,
-                    "completed_at": existing.completed_at,
-                    "status": existing.status,
-                    "request_fingerprint": existing.request_fingerprint,
-                    "content_hash": existing.content_hash,
-                    "row_count": existing.row_count,
-                    "error_message": existing.error_message,
-                }
+        if (
+            existing_by_id is not None
+            and existing_by_key is not None
+            and existing_by_id.batch_id != existing_by_key.batch_id
+        ):
+            raise RepositoryConflictError(
+                "ingestion batch identity contains different content or provenance"
             )
+        existing = existing_by_id or existing_by_key
+        if existing is not None:
+            persisted = _ingestion_batch_from_record(existing)
+            if _stable_ingestion_batch_payload(persisted) != _stable_ingestion_batch_payload(batch):
+                raise RepositoryConflictError(
+                    "ingestion batch identity contains different content or provenance"
+                )
+            return persisted
         values = batch.model_dump(mode="python")
         values["status"] = batch.status.value
         values["usage_mode"] = batch.usage_mode.value
@@ -563,6 +561,22 @@ class SqlAlchemyMarketDataRepository:
     def upsert_price_bars(self, bars: Iterable[PriceBar]) -> int:
         inserted = 0
         for bar in bars:
+            existing_attempt = self.session.scalar(
+                select(PriceBarRecord).where(
+                    PriceBarRecord.ingestion_batch_id == bar.ingestion_batch_id,
+                    PriceBarRecord.source_record_id == bar.source_record_id,
+                )
+            )
+            if existing_attempt is not None:
+                if _stable_price_bar_payload(
+                    _price_bar_from_record(existing_attempt)
+                ) != _stable_price_bar_payload(bar):
+                    raise RepositoryConflictError(
+                        "price bar attempt identity contains different numerical "
+                        "or provenance values"
+                    )
+                continue
+
             existing = self.session.scalar(
                 select(PriceBarRecord).where(
                     PriceBarRecord.security_id == bar.security_id,
@@ -572,28 +586,12 @@ class SqlAlchemyMarketDataRepository:
                     PriceBarRecord.available_at == bar.available_at,
                 )
             )
-            if existing:
-                # Same vintage must be byte-for-byte stable. A correction needs
-                # a later available_at and therefore becomes a new vintage.
-                comparable = (
-                    existing.open,
-                    existing.high,
-                    existing.low,
-                    existing.close,
-                    existing.adjusted_close,
-                    existing.volume,
-                )
-                incoming = (
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.adjusted_close,
-                    bar.volume,
-                )
-                if comparable != incoming:
+            if existing is not None:
+                if _stable_price_bar_payload(
+                    _price_bar_from_record(existing)
+                ) != _stable_price_bar_payload(bar):
                     raise RepositoryConflictError(
-                        "price bar vintage contains different numerical values"
+                        "price bar vintage contains different numerical or provenance values"
                     )
                 continue
             values = bar.model_dump(mode="python")
@@ -642,6 +640,65 @@ class SqlAlchemyMarketDataRepository:
             key = (row.security_id, row.frequency, row.source, row.effective_at)
             latest.setdefault(key, row)
         return tuple(_price_bar_from_record(row) for row in latest.values())
+
+
+def _stable_ingestion_batch_payload(batch: IngestionBatch) -> tuple[object, ...]:
+    return (
+        batch.batch_id,
+        batch.batch_key,
+        batch.provider,
+        batch.original_source,
+        batch.dataset,
+        batch.status,
+        batch.request_fingerprint,
+        batch.content_hash,
+        batch.row_count,
+        batch.usage_mode,
+    )
+
+
+def _ingestion_batch_from_record(row: IngestionBatchRecord) -> IngestionBatch:
+    return IngestionBatch.model_validate(
+        {
+            "batch_id": row.batch_id,
+            "batch_key": row.batch_key,
+            "provider": row.provider,
+            "original_source": row.original_source,
+            "usage_mode": row.usage_mode,
+            "dataset": row.dataset,
+            "requested_at": row.requested_at,
+            "started_at": row.started_at,
+            "completed_at": row.completed_at,
+            "status": row.status,
+            "request_fingerprint": row.request_fingerprint,
+            "content_hash": row.content_hash,
+            "row_count": row.row_count,
+            "error_message": row.error_message,
+        }
+    )
+
+
+def _stable_price_bar_payload(bar: PriceBar) -> tuple[object, ...]:
+    return (
+        bar.security_id,
+        bar.session_date,
+        bar.frequency.value,
+        bar.effective_at,
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.adjusted_close,
+        bar.volume,
+        bar.currency,
+        bar.adjustment_factor,
+        bar.total_return_factor,
+        bar.source,
+        bar.source_record_id,
+        bar.provider_identifier,
+        tuple(sorted(flag.value for flag in bar.quality_flags)),
+        bar.usage_mode.value,
+    )
 
 
 def _price_bar_from_record(row: PriceBarRecord) -> PriceBar:

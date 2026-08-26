@@ -95,12 +95,14 @@ def _batch(
     *,
     row_count: int,
     requested_at: datetime,
+    batch_key: str = "fixture:roundtrip:2024-01-09",
+    content_hash: str = "abcdef12fixture",
     status: BatchStatus = BatchStatus.SUCCEEDED,
     error_message: str | None = None,
 ) -> IngestionBatch:
     return IngestionBatch(
         batch_id=batch_id,
-        batch_key="fixture:roundtrip:2024-01-09",
+        batch_key=batch_key,
         provider="fixture",
         original_source="fixture",
         dataset="daily_price_bar",
@@ -109,7 +111,7 @@ def _batch(
         completed_at=requested_at + timedelta(seconds=1),
         status=status,
         request_fingerprint="12345678fixture",
-        content_hash="abcdef12fixture",
+        content_hash=content_hash,
         row_count=row_count,
         error_message=error_message,
         usage_mode=DataUsageMode.UNVERIFIED,
@@ -165,8 +167,17 @@ def test_price_and_feature_repositories_return_latest_knowable_vintage(
 
     market_repository = SqlAlchemyMarketDataRepository(sqlite_session)
     requested_at = datetime(2024, 1, 10, 10, 0, tzinfo=UTC)
-    batch = _batch(ingestion_batch_id, row_count=2, requested_at=requested_at)
+    revised_batch_id = UUID("05050505-0505-4505-8505-050505050505")
+    batch = _batch(ingestion_batch_id, row_count=1, requested_at=requested_at)
+    revised_batch = _batch(
+        revised_batch_id,
+        row_count=1,
+        requested_at=requested_at,
+        batch_key="fixture:roundtrip:2024-01-09:revised",
+        content_hash="abcdef12fixture-revised",
+    )
     market_repository.add_ingestion_batch(batch)
+    market_repository.add_ingestion_batch(revised_batch)
     stored_batch = market_repository.add_ingestion_batch(batch)
     assert stored_batch.original_source == "fixture"
     assert stored_batch.usage_mode == DataUsageMode.UNVERIFIED
@@ -183,7 +194,7 @@ def test_price_and_feature_repositories_return_latest_knowable_vintage(
     revised_bar = _bar(
         bar_id=UUID("02020202-0202-4202-8202-020202020202"),
         security_id=sample_security.security_id,
-        batch_id=ingestion_batch_id,
+        batch_id=revised_batch_id,
         available_at=revised_available,
         ingested_at=requested_at,
         close=105.0,
