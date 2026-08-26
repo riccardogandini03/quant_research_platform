@@ -32,6 +32,7 @@ BATCH_ID = UUID("22222222-2222-4222-8222-222222222222")
 BATCH_KEY = "lseg:daily_price_bar:attempt-one"
 BAR_ID = UUID("33333333-3333-4333-8333-333333333333")
 SOURCE_RECORD_ID = "EXAMPLE.O:2024-01-09"
+ALTERNATE_SECURITY_ID = UUID("12121212-1212-4212-8212-121212121212")
 
 
 def _batch(
@@ -112,6 +113,12 @@ def _repository_with_security(
 ) -> SqlAlchemyMarketDataRepository:
     SqlAlchemySecurityRepository(sqlite_session).add_security(sample_security)
     return SqlAlchemyMarketDataRepository(sqlite_session)
+
+
+def _validated_bar_copy(bar: PriceBar, changed: dict[str, Any]) -> PriceBar:
+    payload = bar.model_dump(mode="python")
+    payload.update(changed)
+    return PriceBar.model_validate(payload)
 
 
 def test_identical_batch_identity_ignores_retry_clocks_and_error_formatting(
@@ -221,14 +228,41 @@ def test_matching_attempt_skips_regenerated_bar_identity_and_acquisition_times(
 @pytest.mark.parametrize(
     "changed",
     (
-        {"close": 101.0, "adjusted_close": 101.0},
+        {"security_id": ALTERNATE_SECURITY_ID},
+        {"session_date": date(2024, 1, 8)},
+        {"effective_at": EFFECTIVE_AT + timedelta(minutes=1)},
+        {"open": 100.0},
+        {"high": 103.0},
+        {"low": 97.0},
+        {"close": 101.0},
+        {"adjusted_close": 101.0},
+        {"volume": 1_100.0},
         {"currency": "EUR"},
+        {"adjustment_factor": 1.01},
+        {"total_return_factor": 1.01},
         {"provider_identifier": "OTHER.O"},
         {"quality_flags": (DataQualityFlag.SNAPSHOT_ONLY,)},
         {"source": "other_vendor"},
         {"usage_mode": DataUsageMode.USER_SUPPLIED},
     ),
-    ids=("close", "currency", "provider-identifier", "flags", "source", "usage"),
+    ids=(
+        "security-id",
+        "session-date",
+        "effective-at",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted-close",
+        "volume",
+        "currency",
+        "adjustment-factor",
+        "total-return-factor",
+        "provider-identifier",
+        "flags",
+        "source",
+        "usage",
+    ),
 )
 def test_matching_attempt_rejects_changed_numerical_or_provenance_values(
     sqlite_session: Session,
@@ -236,16 +270,21 @@ def test_matching_attempt_rejects_changed_numerical_or_provenance_values(
     changed: dict[str, Any],
 ) -> None:
     repository = _repository_with_security(sqlite_session, sample_security)
+    if changed.get("security_id") == ALTERNATE_SECURITY_ID:
+        SqlAlchemySecurityRepository(sqlite_session).add_security(
+            sample_security.model_copy(update={"security_id": ALTERNATE_SECURITY_ID})
+        )
     repository.add_ingestion_batch(_batch())
     first = _bar(security_id=sample_security.security_id)
     repository.upsert_price_bars([first])
-    retry = first.model_copy(
-        update={
+    retry = _validated_bar_copy(
+        first,
+        {
             "price_bar_id": UUID("77777777-7777-4777-8777-777777777777"),
             "available_at": AVAILABLE_AT + timedelta(hours=1),
             "ingested_at": AVAILABLE_AT + timedelta(hours=1, minutes=1),
             **changed,
-        }
+        },
     )
 
     with pytest.raises(
@@ -258,9 +297,45 @@ def test_matching_attempt_rejects_changed_numerical_or_provenance_values(
         repository.upsert_price_bars([retry])
 
 
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"session_date": date(2024, 1, 8)},
+        {"open": 100.0},
+        {"high": 103.0},
+        {"low": 97.0},
+        {"close": 101.0},
+        {"adjusted_close": 101.0},
+        {"volume": 1_100.0},
+        {"currency": "EUR"},
+        {"adjustment_factor": 1.01},
+        {"total_return_factor": 1.01},
+        {"source_record_id": "EXAMPLE.O:2024-01-09:revised"},
+        {"provider_identifier": "OTHER.O"},
+        {"quality_flags": (DataQualityFlag.SNAPSHOT_ONLY,)},
+        {"usage_mode": DataUsageMode.USER_SUPPLIED},
+    ),
+    ids=(
+        "session-date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted-close",
+        "volume",
+        "currency",
+        "adjustment-factor",
+        "total-return-factor",
+        "source-record-id",
+        "provider-identifier",
+        "flags",
+        "usage",
+    ),
+)
 def test_same_natural_vintage_rejects_changed_content_from_distinct_attempt(
     sqlite_session: Session,
     sample_security: Security,
+    changed: dict[str, Any],
 ) -> None:
     repository = _repository_with_security(sqlite_session, sample_security)
     first_batch = _batch()
@@ -271,12 +346,15 @@ def test_same_natural_vintage_rejects_changed_content_from_distinct_attempt(
     )
     repository.add_ingestion_batch(first_batch)
     repository.add_ingestion_batch(second_batch)
-    repository.upsert_price_bars([_bar(security_id=sample_security.security_id)])
-    contradictory = _bar(
-        security_id=sample_security.security_id,
-        batch_id=second_batch.batch_id,
-        price_bar_id=UUID("99999999-9999-4999-8999-999999999999"),
-        close=101.0,
+    first = _bar(security_id=sample_security.security_id)
+    repository.upsert_price_bars([first])
+    contradictory = _validated_bar_copy(
+        first,
+        {
+            "ingestion_batch_id": second_batch.batch_id,
+            "price_bar_id": UUID("99999999-9999-4999-8999-999999999999"),
+            **changed,
+        },
     )
 
     with pytest.raises(
@@ -284,6 +362,33 @@ def test_same_natural_vintage_rejects_changed_content_from_distinct_attempt(
         match=(r"^price bar vintage contains different numerical or provenance values$"),
     ):
         repository.upsert_price_bars([contradictory])
+
+
+def test_same_natural_vintage_skips_equal_payload_from_distinct_attempt(
+    sqlite_session: Session,
+    sample_security: Security,
+) -> None:
+    repository = _repository_with_security(sqlite_session, sample_security)
+    first_batch = _batch()
+    second_batch = _batch(
+        batch_id=UUID("89898989-8989-4989-8989-898989898989"),
+        batch_key="lseg:daily_price_bar:attempt-equal-vintage",
+        content_hash="content-hash-equal-vintage",
+    )
+    repository.add_ingestion_batch(first_batch)
+    repository.add_ingestion_batch(second_batch)
+    first = _bar(security_id=sample_security.security_id)
+    equal_retry = _validated_bar_copy(
+        first,
+        {
+            "ingestion_batch_id": second_batch.batch_id,
+            "price_bar_id": UUID("90909090-9090-4090-8090-909090909090"),
+        },
+    )
+
+    assert repository.upsert_price_bars([first]) == 1
+    assert repository.upsert_price_bars([equal_retry]) == 0
+    assert sqlite_session.scalar(select(func.count()).select_from(PriceBarRecord)) == 1
 
 
 def test_later_availability_persists_correction_and_as_of_selects_each_vintage(
